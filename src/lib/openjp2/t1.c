@@ -56,6 +56,11 @@
 #endif
 
 #include "t1_luts.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+
 
 /** @defgroup T1 T1 - Implementation of the tier-1 coding */
 /*@{*/
@@ -2421,6 +2426,191 @@ static void opj_t1_cblk_encode_processor(void* user_data, opj_tls_t* tls)
             }
         }
     }
+
+    /* ---- BEGIN INJECT (replace Tier-1 input from libisyntax dump) ---- */
+    {
+        const char* inj_env = getenv("OPJ_INJECT_CBLK");
+        if (inj_env && inj_env[0] == '1') {
+
+            /* Only inject for reversible 5/3 path for now */
+            if (tccp->qmfbid == 1) {
+
+                /* Restrict to one known block first (adjust as needed) */
+                const int want_band = 1;   /* 0=LL 1=HL 2=LH 3=HH */
+                const int want_x0   = 0;
+                const int want_y0   = 64;
+
+                const int w = (int)(cblk->x1 - cblk->x0);
+                const int h = (int)(cblk->y1 - cblk->y0);
+
+                if ((int)band->bandno == want_band &&
+                    (int)cblk->x0 == want_x0 &&
+                    (int)cblk->y0 == want_y0 &&
+                    w == 64 && h == 64) {
+
+                    const char* dir = getenv("OPJ_INJECT_DIR");
+                    if (!dir || !dir[0]) dir = ".";
+
+                    char inpath[1024];
+                    /* For this first test, inject HL only */
+                    snprintf(inpath, sizeof(inpath), "%s/isy_HL.bin", dir);
+
+                    FILE* f = fopen(inpath, "rb");
+                    if (f) {
+                        /* parse simple header until DATA_BEGIN */
+                        char line[256];
+                        int in_w = -1, in_h = -1;
+                        while (fgets(line, sizeof(line), f)) {
+                            if (strcmp(line, "DATA_BEGIN\n") == 0) break;
+                            if (sscanf(line, "w=%d\n", &in_w) == 1) continue;
+                            if (sscanf(line, "h=%d\n", &in_h) == 1) continue;
+                        }
+
+                        if (in_w == w && in_h == h) {
+                            /* read payload: int32 row-major */
+                            const int n = w * h;
+                            OPJ_INT32* buf = (OPJ_INT32*)opj_malloc((OPJ_SIZE_T)n * sizeof(OPJ_INT32));
+                            if (buf) {
+                                size_t got = fread(buf, sizeof(OPJ_INT32), (size_t)n, f);
+                                if (got == (size_t)n) {
+
+                                    /* overwrite t1->data (note: t1->data is OPJ_INT32*) */
+                                    const int fb = (int)T1_NMSEDEC_FRACBITS;
+                                    for (int yy = 0; yy < h; yy++) {
+                                        for (int xx = 0; xx < w; xx++) {
+                                            const int idx = yy * w + xx;
+                                            t1->data[idx] = (OPJ_INT32)(buf[idx] << fb);
+                                        }
+                                    }
+
+                                    fprintf(stderr,
+                                        "INJECTED isy_HL.bin into band=%d cblk=(%d,%d) w=%d h=%d fb=%d\n",
+                                        (int)band->bandno, (int)cblk->x0, (int)cblk->y0, w, h, fb);
+                                }
+                                opj_free(buf);
+                            }
+                        }
+
+                        fclose(f);
+                    } else {
+                        fprintf(stderr, "INJECT: could not open %s\n", inpath);
+                    }
+                }
+            }
+        }
+    }
+    /* ---- END INJECT ---- */
+
+
+    // Need to dump here
+
+    int bno = (int)band->bandno;
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /* ---- BEGIN DEBUG DUMP (Tier-1 input) ---- */
+    {
+        const char* dump_env = getenv("OPJ_DUMP_CBLK");
+        if (dump_env && dump_env[0] == '1') {
+            // fprintf(stderr, "OPJ_DUMP_CBLK hit\n");
+
+            /* Optional limiter: dump at most N blocks */
+            static int dumped = 0;
+            int max_dump = 1; /* default */
+            const char* max_env = getenv("OPJ_DUMP_CBLK_MAX");
+            if (max_env && max_env[0]) {
+                int v = atoi(max_env);
+                if (v > 0) max_dump = v;
+            }
+
+            if (dumped < max_dump) {
+                /* Output path */
+                const char* out_dir = getenv("OPJ_DUMP_CBLK_DIR");
+                if (!out_dir || !out_dir[0]) out_dir = ".";
+
+                /* cblk geometry */
+                const int w = (int)(cblk->x1 - cblk->x0);
+                const int h = (int)(cblk->y1 - cblk->y0);
+
+                /* Make a unique-ish filename */
+                char path[1024];
+                const int qmfbid = (int)tccp->qmfbid;
+                const int fracbits = (int)T1_NMSEDEC_FRACBITS;
+
+                /* band->bandno might exist; if it doesn't compile, set bandno_dbg = -1 */
+                const int bandno_dbg = (int)band->bandno;
+
+                snprintf(
+                    path, sizeof(path),
+                    "%s/opj_cblk_%06d_b%d_q%d_fb%d_x%d_y%d_w%d_h%d.bin",
+                    out_dir,
+                    dumped,
+                    bandno_dbg,
+                    qmfbid,
+                    fracbits,
+                    (int)cblk->x0,
+                    (int)cblk->y0,
+                    w, h
+                );
+
+
+
+                FILE* f = fopen(path, "wb");
+                if (f) {
+                    /* Write a small ASCII header for sanity */
+                    fprintf(f,
+                        "OPJ_CBLK_DUMP\n"
+                        "bandno=%d\n"
+                        "qmfbid=%d\n"
+                        "fracbits=%d\n"
+                        "band_x0=%d\nband_y0=%d\nband_x1=%d\nband_y1=%d\n"
+                        "cblk_x0=%d\ncblk_y0=%d\ncblk_x1=%d\ncblk_y1=%d\n"
+                        "w=%d\nh=%d\n"
+                        "format=int32_rowmajor\n"
+                        "DATA_BEGIN\n",
+                        bandno_dbg,
+                        (int)tccp->qmfbid,
+                        (int)T1_NMSEDEC_FRACBITS,
+                        (int)band->x0, (int)band->y0, (int)band->x1, (int)band->y1,
+                        (int)cblk->x0, (int)cblk->y0, (int)cblk->x1, (int)cblk->y1,
+                        w, h
+                    );
+
+
+
+                    /*
+                    The Tier-1 code uses an internal buffer for the code-block samples.
+                    In OpenJPEG, this is typically stored in t1->data with stride t1->w,
+                    and an offset computed from the code-block position.
+                    At this point in the pipeline, the buffer should already contain
+                    the coefficients that will be encoded.
+                    */
+
+                    /* Locate the top-left of this code-block in the Tier-1 buffer */
+                    const int t1_w = (int)t1->w;
+                    const int off_x = (int)(cblk->x0 - band->x0);
+                    const int off_y = (int)(cblk->y0 - band->y0);
+                    const int base = off_y * t1_w + off_x;
+
+                    /* Dump as int32 row-major */
+                    for (int yy = 0; yy < h; yy++) {
+                        const int row = base + yy * t1_w;
+                        for (int xx = 0; xx < w; xx++) {
+                            int32_t v = (int32_t)t1->data[row + xx];
+                            fwrite(&v, sizeof(v), 1, f);
+                        }
+                    }
+
+                    fclose(f);
+                    dumped++;
+                }
+            }
+        }
+    }
+    /* ---- END DEBUG DUMP ---- */
+
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////
 
     {
         OPJ_FLOAT64 cumwmsedec =
