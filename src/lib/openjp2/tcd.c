@@ -42,6 +42,11 @@
 #include "opj_includes.h"
 #include "opj_common.h"
 
+#include <stdlib.h> 
+#include <string.h>
+#include <stdio.h>
+
+
 // #define DEBUG_RATE_ALLOC
 
 /* ----------------------------------------------------------------------- */
@@ -110,6 +115,72 @@ void tcd_dump(FILE *fd, opj_tcd_t *tcd, opj_tcd_image_t * img)
 }
 #endif
 
+typedef struct isy_cblk_dump_t {
+    OPJ_INT32 x0;
+    OPJ_INT32 y0;
+    OPJ_INT32 w;
+    OPJ_INT32 h;
+    OPJ_INT32* data; /* w*h int32 payload */
+} isy_cblk_dump_t;
+
+static void isy_free_cblk_dump(isy_cblk_dump_t* d)
+{
+    if (!d) return;
+    if (d->data) opj_free(d->data);
+    d->data = NULL;
+}
+
+static OPJ_BOOL isy_read_cblk_dump(const char* path, isy_cblk_dump_t* out)
+{
+    memset(out, 0, sizeof(*out));
+
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[EXT_DWT] failed to open %s\n", path);
+        return OPJ_FALSE;
+    }
+
+    /* Read header line-by-line until DATA_BEGIN */
+    char line[256];
+    OPJ_BOOL saw_data_begin = OPJ_FALSE;
+
+    while (fgets(line, (int)sizeof(line), f) != NULL) {
+        if (strncmp(line, "x0=", 3) == 0) out->x0 = (OPJ_INT32)atoi(line + 3);
+        else if (strncmp(line, "y0=", 3) == 0) out->y0 = (OPJ_INT32)atoi(line + 3);
+        else if (strncmp(line, "w=", 2) == 0) out->w  = (OPJ_INT32)atoi(line + 2);
+        else if (strncmp(line, "h=", 2) == 0) out->h  = (OPJ_INT32)atoi(line + 2);
+        else if (strncmp(line, "DATA_BEGIN", 10) == 0) {
+            saw_data_begin = OPJ_TRUE;
+            break;
+        }
+    }
+
+    if (!saw_data_begin || out->w <= 0 || out->h <= 0) {
+        fprintf(stderr, "[EXT_DWT] bad header in %s\n", path);
+        fclose(f);
+        return OPJ_FALSE;
+    }
+
+    size_t n = (size_t)out->w * (size_t)out->h;
+    out->data = (OPJ_INT32*)opj_malloc(n * sizeof(OPJ_INT32));
+    if (!out->data) {
+        fclose(f);
+        return OPJ_FALSE;
+    }
+
+    size_t got = fread(out->data, sizeof(OPJ_INT32), n, f);
+    fclose(f);
+
+    if (got != n) {
+        fprintf(stderr, "[EXT_DWT] short payload read %s got=%zu expected=%zu\n", path, got, n);
+        isy_free_cblk_dump(out);
+        return OPJ_FALSE;
+    }
+
+    return OPJ_TRUE;
+}
+
+
 /**
  * Initializes tile coding/decoding
  */
@@ -144,6 +215,11 @@ static OPJ_BOOL opj_tcd_code_block_enc_allocate_data(opj_tcd_cblk_enc_t *
  * Deallocates the encoding data of the given precinct.
  */
 static void opj_tcd_code_block_enc_deallocate(opj_tcd_precinct_t * p_precinct);
+
+/**
+ * External DWT via ISyntax library
+ */
+static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd);
 
 static
 void opj_tcd_makelayer_fixed(opj_tcd_t *tcd, OPJ_UINT32 layno,
@@ -199,6 +275,7 @@ static OPJ_BOOL opj_tcd_rate_allocate_encode(opj_tcd_t *p_tcd,
 
 static OPJ_BOOL opj_tcd_is_whole_tilecomp_decoding(opj_tcd_t *tcd,
         OPJ_UINT32 compno);
+
 
 /* ----------------------------------------------------------------------- */
 
@@ -1504,9 +1581,27 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
         /* FIXME _ProfStop(PGROUP_MCT); */
 
         /* FIXME _ProfStart(PGROUP_DWT); */
-        if (! opj_tcd_dwt_encode(p_tcd)) {
-            return OPJ_FALSE;
+        // if (! opj_tcd_dwt_encode(p_tcd)) {
+        //     return OPJ_FALSE;
+        // }
+
+
+        ////////////////////////////////////////////////////////////////////////////////////////////////
+        // External DWT via ISyntax library
+
+        if (getenv("OPJ_EXTERNAL_DWT") != NULL) {
+            if (!external_fill_tilec_from_isyntax(p_tcd)) {
+                return OPJ_FALSE;
+            }
+        } else {
+            if (!opj_tcd_dwt_encode(p_tcd)) {
+                return OPJ_FALSE;
+            }
         }
+
+
+        ////////////////////////////////////////////////////////////////////////////////////////////////
+
         /* FIXME  _ProfStop(PGROUP_DWT); */
 
         /* FIXME  _ProfStart(PGROUP_T1); */
@@ -1541,6 +1636,114 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
 
     return OPJ_TRUE;
 }
+
+// External ISyntax library
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+#include <string.h>
+
+static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
+{
+    opj_tcd_tile_t *tile = p_tcd->tcd_image->tiles;
+
+    for (OPJ_UINT32 compno = 0; compno < tile->numcomps; ++compno) {
+        opj_tcd_tilecomp_t *tilec = &tile->comps[compno];
+
+        OPJ_INT32 tile_w = (OPJ_INT32)(tilec->x1 - tilec->x0);
+        OPJ_INT32 tile_h = (OPJ_INT32)(tilec->y1 - tilec->y0);
+
+        memset(tilec->data, 0, (size_t)tile_w * (size_t)tile_h * sizeof(OPJ_INT32));
+
+        for (OPJ_UINT32 resno = 0; resno < tilec->numresolutions; ++resno) {
+            opj_tcd_resolution_t *res = &tilec->resolutions[resno];
+
+            for (OPJ_UINT32 bandidx = 0; bandidx < res->numbands; ++bandidx) {
+                opj_tcd_band_t *band = &res->bands[bandidx];
+
+                const char* band_label =
+                    (band->bandno == 0) ? "LL" :
+                    (band->bandno == 1) ? "HL" :
+                    (band->bandno == 2) ? "LH" :
+                    (band->bandno == 3) ? "HH" : NULL;
+
+                if (!band_label) {
+                    continue;
+                }
+
+                OPJ_UINT32 num_precincts = (OPJ_UINT32)(res->pw * res->ph);
+
+                for (OPJ_UINT32 precno = 0; precno < num_precincts; ++precno) {
+                    opj_tcd_precinct_t *prc = &band->precincts[precno];
+
+                    for (OPJ_UINT32 cblkno = 0; cblkno < (OPJ_UINT32)(prc->cw * prc->ch); ++cblkno) {
+                        opj_tcd_cblk_enc_t *cblk = &prc->cblks.enc[cblkno];
+
+                        /////////////////////////////////////////////////// HERE WE FILL THE CBLK FROM ISYNTAX DUMP
+
+                        OPJ_INT32 w = cblk->x1 - cblk->x0;
+                        OPJ_INT32 h = cblk->y1 - cblk->y0;
+
+                        /* Build filename for THIS code-block */
+                        char path[512];
+                        snprintf(path, sizeof(path),
+                            "/Users/yaellyshkow/Desktop/libisyntax/isy_r%u_%s_c%u_x0_%d_y0_%d.bin",
+                            resno, band_label, compno, cblk->x0, cblk->y0);
+
+
+                        /* Load the dump */
+                        isy_cblk_dump_t dump;
+                        if (!isy_read_cblk_dump(path, &dump)) {
+                            /* No dump for this block → leave it zero */
+                            continue;
+                        }
+
+                        ///////////////////////////////////////////////////
+
+                        /* Sanity check */
+                        if (dump.w != w || dump.h != h || dump.x0 != cblk->x0 || dump.y0 != cblk->y0) {
+                            fprintf(stderr,
+                                    "[EXT_DWT] mismatch %s dump=(%d,%d %dx%d) cblk=(%d,%d %dx%d)\n",
+                                    path,
+                                    dump.x0, dump.y0, dump.w, dump.h,
+                                    cblk->x0, cblk->y0, w, h);
+                            isy_free_cblk_dump(&dump);
+                            continue;
+                        }
+
+                        OPJ_INT32 tile_x = (OPJ_INT32)band->x0 + (OPJ_INT32)cblk->x0;
+                        OPJ_INT32 tile_y = (OPJ_INT32)band->y0 + (OPJ_INT32)cblk->y0;
+
+                        /* Basic bounds safety (optional but recommended) */
+                        if (tile_x < 0 || tile_y < 0 || tile_x + w > tile_w || tile_y + h > tile_h) {
+                            fprintf(stderr, "[EXT_DWT] OOB write band=%s tile_x=%d tile_y=%d w=%d h=%d tile_w=%d tile_h=%d\n",
+                                    band_label, tile_x, tile_y, w, h, tile_w, tile_h);
+                            isy_free_cblk_dump(&dump);
+                            continue;
+                        }
+
+                        for (OPJ_INT32 yy = 0; yy < h; ++yy) {
+                            memcpy(&tilec->data[(tile_y + yy) * tile_w + tile_x],
+                                &dump.data[yy * w],
+                                (size_t)w * sizeof(OPJ_INT32));
+                        }
+
+                        fprintf(stderr,
+                                "[EXT_DWT] filled comp=%u res=%u band=%s cblk=(%d,%d) %dx%d\n",
+                                compno, resno, band_label, cblk->x0, cblk->y0, w, h);
+
+                        isy_free_cblk_dump(&dump);
+                    }
+                }
+            }
+        }
+    }
+
+    return OPJ_TRUE;
+}
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////
 
 OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
                              OPJ_UINT32 win_x0,
