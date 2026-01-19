@@ -1763,7 +1763,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                             continue;
                         }
 
-                        /* DC shift for unsigned 8-bit */
+                        /* DC shift for unsigned 8-bit - apply to Y only in LL band */
                         const OPJ_INT32 dc = 128;
                         for (OPJ_INT32 i = 0; i < w * h; ++i) {
                             dumpY.data[i] -= dc;
