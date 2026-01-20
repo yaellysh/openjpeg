@@ -142,11 +142,76 @@ static OPJ_BOOL isy_read_cblk_dump(const char *path, isy_cblk_dump_t *out)
     memset(out, 0, sizeof(*out));
 
     FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[EXT_DWT] failed to open %s\n", path);
+        return OPJ_FALSE;
+    }
+
+    /* Parse ASCII header until DATA_BEGIN */
+    char line[256];
+    OPJ_BOOL saw_data_begin = OPJ_FALSE;
+
+    while (fgets(line, (int)sizeof(line), f) != NULL) {
+        if (strncmp(line, "x0=", 3) == 0) out->x0 = (OPJ_INT32)atoi(line + 3);
+        else if (strncmp(line, "y0=", 3) == 0) out->y0 = (OPJ_INT32)atoi(line + 3);
+        else if (strncmp(line, "w=",  2) == 0) out->w  = (OPJ_INT32)atoi(line + 2);
+        else if (strncmp(line, "h=",  2) == 0) out->h  = (OPJ_INT32)atoi(line + 2);
+        else if (strncmp(line, "DATA_BEGIN", 10) == 0) { saw_data_begin = OPJ_TRUE; break; }
+    }
+
+    if (!saw_data_begin || out->w <= 0 || out->h <= 0) {
+        fprintf(stderr, "[EXT_DWT] bad header in %s\n", path);
+        fclose(f);
+        return OPJ_FALSE;
+    }
+
+    const size_t n = (size_t)out->w * (size_t)out->h;
+    out->data = (OPJ_INT32*)opj_malloc(n * sizeof(OPJ_INT32));
+    if (!out->data) {
+        fclose(f);
+        return OPJ_FALSE;
+    }
+
+    /* Payload is raw int32 */
+    const size_t got = fread(out->data, sizeof(OPJ_INT32), n, f);
+    fclose(f);
+
+    if (got != n) {
+        fprintf(stderr, "[EXT_DWT] short payload read %s got=%zu expected=%zu\n", path, got, n);
+        isy_free_cblk_dump(out);
+        return OPJ_FALSE;
+    }
+
+    return OPJ_TRUE;
+}
+
+
+
+
+
+static OPJ_BOOL isy_read_cblk_dump_old(const char *path, isy_cblk_dump_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    FILE *f = fopen(path, "rb");
     if (!f)
     {
         fprintf(stderr, "[EXT_DWT] failed to open %s\n", path);
         return OPJ_FALSE;
     }
+
+    fseek(f, 0, SEEK_END);
+    long fsz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    fprintf(stderr, "[READ] %s size=%ld\n", path, fsz);
+
+    unsigned char hdr[16];
+    size_t m = fread(hdr, 1, 16, f);
+    fprintf(stderr, "[READ] %s first16:", path);
+    for (size_t i=0;i<m;i++) fprintf(stderr, " %02x", hdr[i]);
+    fprintf(stderr, "\n");
+    fseek(f, 0, SEEK_SET);
+
 
     /* Read header line-by-line until DATA_BEGIN */
     char line[256];
@@ -184,15 +249,23 @@ static OPJ_BOOL isy_read_cblk_dump(const char *path, isy_cblk_dump_t *out)
         return OPJ_FALSE;
     }
 
-    size_t got = fread(out->data, sizeof(OPJ_INT32), n, f);
+    // size_t got = fread(out->data, sizeof(OPJ_INT32), n, f);
+    for (size_t i = 0; i < n; ++i) {
+        int v;
+        if (fscanf(f, "%d", &v) != 1) {
+            fprintf(stderr, "[EXT_DWT] failed reading int %zu in %s\n", i, path);
+            fclose(f);
+            isy_free_cblk_dump(out);
+            return OPJ_FALSE;
+        }
+        out->data[i] = (OPJ_INT32)v;
+    }
     fclose(f);
 
-    if (got != n)
-    {
-        fprintf(stderr, "[EXT_DWT] short payload read %s got=%zu expected=%zu\n", path, got, n);
-        isy_free_cblk_dump(out);
-        return OPJ_FALSE;
-    }
+    fprintf(stderr, "[READ] %s payload samp: %d %d %d %d\n",
+        path,
+        out->data[0], out->data[1],
+        out->data[37], out->data[out->w*out->h - 1]);
 
     return OPJ_TRUE;
 }
@@ -1964,13 +2037,13 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                     continue;
                 }
 
-                if (okY && okC1 && okC2) {
-                    for (int i = 0; i < dumpY.w * dumpY.h; ++i) {
-                        dumpY.data[i]  = (OPJ_INT32)(int8_t)(uint8_t)dumpY.data[i];
-                        dumpC1.data[i] = (OPJ_INT32)(int8_t)(uint8_t)dumpC1.data[i];
-                        dumpC2.data[i] = (OPJ_INT32)(int8_t)(uint8_t)dumpC2.data[i];
-                    }
-                }
+                // if (okY && okC1 && okC2) {
+                //     for (int i = 0; i < dumpY.w * dumpY.h; ++i) {
+                //         dumpY.data[i]  = (OPJ_INT32)(int8_t)(uint8_t)dumpY.data[i];
+                //         dumpC1.data[i] = (OPJ_INT32)(int8_t)(uint8_t)dumpC1.data[i];
+                //         dumpC2.data[i] = (OPJ_INT32)(int8_t)(uint8_t)dumpC2.data[i];
+                //     }
+                // }
 
                 if (okY && okC1 && okC2) {
                     ycocg_r_to_rgb_block(&dumpY, &dumpC1, &dumpC2);
@@ -1998,19 +2071,37 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                 OPJ_INT32 py1 = base_y1 + by;
                 OPJ_INT32 px2 = base_x2 + bx;
                 OPJ_INT32 py2 = base_y2 + by;
-
+                
 
                 /* Copy into packed plane at same coords (LL occupies [0..tile_w), [0..tile_h)) */
-                for (OPJ_INT32 yy = 0; yy < dumpY.h; ++yy)
-                {
-                    memcpy(&tile->comps[0].data[(py0 + yy) * tile_w + px0],
-                           &dumpY.data[yy * dumpY.w], dumpY.w * sizeof(OPJ_INT32));
+              
+                    const OPJ_INT32 shift = 1 << (p_tcd->image->comps[0].prec - 1); // 128
+                    for (OPJ_INT32 yy = 0; yy < dumpY.h; ++yy)
+                    {
+                        OPJ_INT32 *dst0 = &tile->comps[0].data[(py0 + yy) * tile_w + px0];
+                        OPJ_INT32 *dst1 = &tile->comps[1].data[(py1 + yy) * tile_w + px1];
+                        OPJ_INT32 *dst2 = &tile->comps[2].data[(py2 + yy) * tile_w + px2];
+
+                        OPJ_INT32 *src0 = &dumpY.data[yy * dumpY.w];
+                        OPJ_INT32 *src1 = &dumpC1.data[yy * dumpC1.w];
+                        OPJ_INT32 *src2 = &dumpC2.data[yy * dumpC2.w];
+
+                        for (OPJ_INT32 xx = 0; xx < dumpY.w; ++xx)
+                        {
+                            dst0[xx] = src0[xx] - shift;
+                            dst1[xx] = src1[xx] - shift;
+                            dst2[xx] = src2[xx] - shift;
+                        }
+                    }
+
+                    // memcpy(&tile->comps[0].data[(py0 + yy) * tile_w + px0],
+                    //        &dumpY.data[yy * dumpY.w], dumpY.w * sizeof(OPJ_INT32));
                            
-                    memcpy(&tile->comps[1].data[(py1 + yy) * tile_w + px1],
-                           &dumpC1.data[yy * dumpC1.w], dumpC1.w * sizeof(OPJ_INT32));
-                    memcpy(&tile->comps[2].data[(py2 + yy) * tile_w + px2],
-                           &dumpC2.data[yy * dumpC2.w], dumpC2.w * sizeof(OPJ_INT32));
-                }
+                    // memcpy(&tile->comps[1].data[(py1 + yy) * tile_w + px1],
+                    //        &dumpC1.data[yy * dumpC1.w], dumpC1.w * sizeof(OPJ_INT32));
+                    // memcpy(&tile->comps[2].data[(py2 + yy) * tile_w + px2],
+                    //        &dumpC2.data[yy * dumpC2.w], dumpC2.w * sizeof(OPJ_INT32));
+                
 
                 fprintf(stderr, "[EXT_DWT] filled LL block (%d,%d) %dx%d\n", bx, by, BS, BS);
 
@@ -2025,6 +2116,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
    2) Fill detail bands (resno >= 1): HL/LH/HH by scanning the dump grid.
       This avoids relying on prc->cblks.enc (which may be empty here).
    ------------------------------------------------------------ */
+#if 1  /* DISABLED FOR TESTING - LL only */
     {
         const OPJ_INT32 BS = 64;    /* dump block stride */
         const OPJ_UINT32 isy_r = 1; /* your dumps: isy_r1_{HL,LH,HH}_* */
@@ -2074,6 +2166,9 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         snprintf(pathC1, sizeof(pathC1), "%s/isy_r%u_%s_c1_x0_%d_y0_%d.bin", BASE, isy_r, band_label, sx, sy);
                         snprintf(pathC2, sizeof(pathC2), "%s/isy_r%u_%s_c2_x0_%d_y0_%d.bin", BASE, isy_r, band_label, sx, sy);
 
+                        fprintf(stderr, "[PATH] %s %s %s\n", pathY, pathC1, pathC2);
+
+
                         isy_cblk_dump_t dumpY, dumpC1, dumpC2;
                         OPJ_BOOL okY = isy_read_cblk_dump(pathY, &dumpY);
                         OPJ_BOOL okC1 = isy_read_cblk_dump(pathC1, &dumpC1);
@@ -2086,10 +2181,11 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                                 dumpC2.data[i] = (OPJ_INT32)(int8_t)(uint8_t)dumpC2.data[i];
                             }
                         }
-   
-                        if (okY && okC1 && okC2) {
-                            ycocg_r_to_rgb_block(&dumpY, &dumpC1, &dumpC2);
-                        }
+                        
+                        // DONT APPLY RGB CONVERSION FOR DETAIL BANDS AS THEY ARE IN WAVELET DOMAIN !!!!!
+                        // if (okY && okC1 && okC2) {
+                        //     ycocg_r_to_rgb_block(&dumpY, &dumpC1, &dumpC2);
+                        // }
 
                         if (okY && okC1 && okC2 && sx == 0 && sy == 0) {
                             fprintf(stderr, "[RAW] %s (0,0)\n", band_label);
@@ -2127,6 +2223,13 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                             continue;
                         }
 
+                        if (sx == 0 && sy == 0) {
+                            long long sum = 0;
+                            int n = dumpY.w * dumpY.h;
+                            for (int i = 0; i < n; ++i) sum += dumpY.data[i];
+                            fprintf(stderr, "[SUM] %s (0,0) = %lld\n", band_label, sum);
+                        }
+
                         /* Expect subband-local coords in dump */
                         if (dumpY.x0 != sx || dumpY.y0 != sy ||
                             dumpC1.x0 != sx || dumpC1.y0 != sy ||
@@ -2161,21 +2264,33 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         opj_tcd_band_t *b1 = &tc1->resolutions[resno].bands[bandidx];
                         opj_tcd_band_t *b2 = &tc2->resolutions[resno].bands[bandidx];
 
-                        /* band origin in tilec->data coordinates */
-                        OPJ_INT32 base_x0 = (OPJ_INT32)(b0->x0 - tc0->x0);
-                        OPJ_INT32 base_y0 = (OPJ_INT32)(b0->y0 - tc0->y0);
-                        OPJ_INT32 base_x1 = (OPJ_INT32)(b1->x0 - tc1->x0);
-                        OPJ_INT32 base_y1 = (OPJ_INT32)(b1->y0 - tc1->y0);
-                        OPJ_INT32 base_x2 = (OPJ_INT32)(b2->x0 - tc2->x0);
-                        OPJ_INT32 base_y2 = (OPJ_INT32)(b2->y0 - tc2->y0);
+                        OPJ_INT32 offx = 0, offy = 0;
+                        if (!strcmp(band_label, "HL")) { offx = pres_w; offy = 0; }
+                        else if (!strcmp(band_label, "LH")) { offx = 0; offy = pres_h; }
+                        else if (!strcmp(band_label, "HH")) { offx = pres_w; offy = pres_h; }
 
-                        /* destination top-left for this dump block */
-                        OPJ_INT32 px0 = base_x0 + sx;
-                        OPJ_INT32 py0 = base_y0 + sy;
-                        OPJ_INT32 px1 = base_x1 + sx;
-                        OPJ_INT32 py1 = base_y1 + sy;
-                        OPJ_INT32 px2 = base_x2 + sx;
-                        OPJ_INT32 py2 = base_y2 + sy;
+                        OPJ_INT32 px0 = offx + sx;
+                        OPJ_INT32 py0 = offy + sy;
+                        OPJ_INT32 px1 = offx + sx;
+                        OPJ_INT32 py1 = offy + sy;
+                        OPJ_INT32 px2 = offx + sx;
+                        OPJ_INT32 py2 = offy + sy;
+
+                        /* band origin in tilec->data coordinates */
+                        // OPJ_INT32 base_x0 = (OPJ_INT32)(b0->x0 - tc0->x0);
+                        // OPJ_INT32 base_y0 = (OPJ_INT32)(b0->y0 - tc0->y0);
+                        // OPJ_INT32 base_x1 = (OPJ_INT32)(b1->x0 - tc1->x0);
+                        // OPJ_INT32 base_y1 = (OPJ_INT32)(b1->y0 - tc1->y0);
+                        // OPJ_INT32 base_x2 = (OPJ_INT32)(b2->x0 - tc2->x0);
+                        // OPJ_INT32 base_y2 = (OPJ_INT32)(b2->y0 - tc2->y0);
+
+                        // /* destination top-left for this dump block */
+                        // OPJ_INT32 px0 = base_x0 + sx;
+                        // OPJ_INT32 py0 = base_y0 + sy;
+                        // OPJ_INT32 px1 = base_x1 + sx;
+                        // OPJ_INT32 py1 = base_y1 + sy;
+                        // OPJ_INT32 px2 = base_x2 + sx;
+                        // OPJ_INT32 py2 = base_y2 + sy;
 
                         if (px0 < 0 || py0 < 0 || px0 + w > tile_w || py0 + h > tile_h ||
                             px1 < 0 || py1 < 0 || px1 + w > tile_w || py1 + h > tile_h ||
@@ -2261,6 +2376,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
             }
         }
     }
+#endif  /* DISABLED FOR TESTING - LL only */
 
     return OPJ_TRUE;
 }
