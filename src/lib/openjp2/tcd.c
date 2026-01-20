@@ -2045,10 +2045,28 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                 //     }
                 // }
 
+                // if (okY && okC1 && okC2) {
+                //     ycocg_r_to_rgb_block(&dumpY, &dumpC1, &dumpC2);
+                // }
+                
                 if (okY && okC1 && okC2) {
-                    ycocg_r_to_rgb_block(&dumpY, &dumpC1, &dumpC2);
+                    // Detail coefficients represent changes/differences
+                    // YCoCg transform for differences (no offset, just rotation)
+                    for (int i = 0; i < dumpY.w * dumpY.h; ++i) {
+                        OPJ_INT32 y  = dumpY.data[i];
+                        OPJ_INT32 co = dumpC1.data[i];
+                        OPJ_INT32 cg = dumpC2.data[i];
+                        
+                        OPJ_INT32 t = y - (cg >> 1);
+                        OPJ_INT32 g = cg + t;
+                        OPJ_INT32 b = t - (co >> 1);
+                        OPJ_INT32 r = b + co;
+                        
+                        dumpY.data[i]  = r;  // Now RGB
+                        dumpC1.data[i] = g;
+                        dumpC2.data[i] = b;
+                    }
                 }
-
                 opj_tcd_tilecomp_t *tc0 = &tile->comps[0];
                 opj_tcd_tilecomp_t *tc1 = &tile->comps[1];
                 opj_tcd_tilecomp_t *tc2 = &tile->comps[2];
@@ -2116,7 +2134,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
    2) Fill detail bands (resno >= 1): HL/LH/HH by scanning the dump grid.
       This avoids relying on prc->cblks.enc (which may be empty here).
    ------------------------------------------------------------ */
-#if 1  /* DISABLED FOR TESTING - LL only */
+#if 0  /* DISABLED FOR TESTING - LL only */
     {
         const OPJ_INT32 BS = 64;    /* dump block stride */
         const OPJ_UINT32 isy_r = 1; /* your dumps: isy_r1_{HL,LH,HH}_* */
