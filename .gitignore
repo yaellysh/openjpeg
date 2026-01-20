@@ -23,9 +23,12 @@ scripts/opjstyle*
 # Generated debug images / outputs
 *.jp2
 *.pgm
+*.ppm
+*.j2k
 *.txt
 
 # Generated directories
 dumps/
+build/
 
 
