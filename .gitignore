@@ -16,3 +16,9 @@ scripts/opjstyle*
 
 # Ignore directories made by `make`.
 /bin/
+
+build/
+debug_idwt__step*.png
+*.j2k
+*.ppm
+
