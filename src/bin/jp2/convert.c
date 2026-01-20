@@ -2046,8 +2046,7 @@ int imagetopnm(opj_image_t * image, const char *outfile, int force_split)
         ncomp = 1;
     }
 
-    if ((force_split == 0) && ncomp >= 2 &&
-            are_comps_similar(image)) {
+    if ((force_split == 0) && ncomp >= 2 && are_comps_similar(image)) {
         fdest = fopen(outfile, "wb");
 
         if (!fdest) {

@@ -1722,10 +1722,12 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                     OPJ_BOOL okC2 = isy_read_cblk_dump(pathC2, &dumpC2);
 
                     if (!okY || !okC1 || !okC2) {
+                        fprintf(stderr, "MISSING cblk res=%u band=%s x0=%d y0=%d\n",
+                            resno, band_label, cblk->x0, cblk->y0);
                         if (okY)  isy_free_cblk_dump(&dumpY);
                         if (okC1) isy_free_cblk_dump(&dumpC1);
                         if (okC2) isy_free_cblk_dump(&dumpC2);
-                        continue;
+                        return OPJ_FALSE;
                     }
 
                     /* Sanity check dims */
@@ -1743,7 +1745,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         isy_free_cblk_dump(&dumpY);
                         isy_free_cblk_dump(&dumpC1);
                         isy_free_cblk_dump(&dumpC2);
-                        continue;
+                        return OPJ_FALSE;
                     }
 
                     /* Compute packed-plane location (must match opj_t1_cblk_encode_processor) */
@@ -1760,14 +1762,14 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                             isy_free_cblk_dump(&dumpY);
                             isy_free_cblk_dump(&dumpC1);
                             isy_free_cblk_dump(&dumpC2);
-                            continue;
+                            return OPJ_FALSE;
                         }
 
                         /* DC shift for unsigned 8-bit - apply to Y only in LL band */
-                        const OPJ_INT32 dc = 128;
-                        for (OPJ_INT32 i = 0; i < w * h; ++i) {
-                            dumpY.data[i] -= dc;
-                        }
+                        // const OPJ_INT32 dc = 128;
+                        // for (OPJ_INT32 i = 0; i < w * h; ++i) {
+                        //     dumpY.data[i] -= dc;
+                        // }
                     }
 
                     /* Bounds check */
@@ -1779,16 +1781,15 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         isy_free_cblk_dump(&dumpY);
                         isy_free_cblk_dump(&dumpC1);
                         isy_free_cblk_dump(&dumpC2);
-                        continue;
+                        return OPJ_FALSE;
                     }
-
-                    /* Inverse YCoCg-R per coefficient.
-                       Assumption: comp1=Co, comp2=Cg.
-                       If colors are wrong, swap dumpC1/dumpC2. */
+                    
+                    /* Copy data into packed planes */
                     for (OPJ_INT32 yy = 0; yy < h; ++yy) {
-                        OPJ_INT32* dstR = &tile->comps[0].data[(OPJ_SIZE_T)(y + yy) * tile_w + (OPJ_SIZE_T)x];
-                        OPJ_INT32* dstG = &tile->comps[1].data[(OPJ_SIZE_T)(y + yy) * tile_w + (OPJ_SIZE_T)x];
-                        OPJ_INT32* dstB = &tile->comps[2].data[(OPJ_SIZE_T)(y + yy) * tile_w + (OPJ_SIZE_T)x];
+
+                        OPJ_INT32* dst0 = &tile->comps[0].data[(y+yy)*tile_w + x];
+                        OPJ_INT32* dst1 = &tile->comps[1].data[(y+yy)*tile_w + x];
+                        OPJ_INT32* dst2 = &tile->comps[2].data[(y+yy)*tile_w + x];
 
                         OPJ_INT32* srcY  = &dumpY.data[yy * w];
                         OPJ_INT32* srcCo = &dumpC1.data[yy * w];
@@ -1796,25 +1797,11 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 
 
                         for (OPJ_INT32 xx = 0; xx < w; ++xx) {
-                            OPJ_INT32 Y  = srcY[xx];
-                            OPJ_INT32 Co = srcCo[xx];
-                            OPJ_INT32 Cg = srcCg[xx];
-
-                            OPJ_INT32 t = Y - (Cg >> 1);
-                            OPJ_INT32 G = Cg + t;
-                            OPJ_INT32 B = t - (Co >> 1);
-                            OPJ_INT32 R = B + Co;
-
-
-                            dstR[xx] = R;
-                            dstG[xx] = G;
-                            dstB[xx] = B;
+                            dst0[xx] = srcY[xx];
+                            dst1[xx] = srcCo[xx];
+                            dst2[xx] = srcCg[xx];
                         }
                     }
-
-                    fprintf(stderr,
-                        "[EXT_DWT] filled RGB res=%u band=%s cblk=(%d,%d) %dx%d\n",
-                        resno, band_label, cblk->x0, cblk->y0, w, h);
 
                     isy_free_cblk_dump(&dumpY);
                     isy_free_cblk_dump(&dumpC1);
