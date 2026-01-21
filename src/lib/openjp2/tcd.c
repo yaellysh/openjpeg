@@ -2326,6 +2326,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
             }
         }
     }
+    
 #endif  /* DISABLED FOR TESTING - LL only */
 
     return OPJ_TRUE;
