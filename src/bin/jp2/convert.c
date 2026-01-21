@@ -836,7 +836,7 @@ opj_image_t* tgatoimage(const char *filename, opj_cparameters_t *parameters)
 
     for (i = 0; i < numcomps; i++) {
         cmptparm[i].prec = 8;
-        cmptparm[i].sgnd = 0;
+        cmptparm[i].sgnd = (i >= 1) ? 1 : 0;  /* comp 1,2 signed; comp 0 unsigned */
         cmptparm[i].dx = (OPJ_UINT32)subsampling_dx;
         cmptparm[i].dy = (OPJ_UINT32)subsampling_dy;
         cmptparm[i].w = image_width;
@@ -1871,7 +1871,7 @@ opj_image_t* pnmtoimage(const char *filename, opj_cparameters_t *parameters)
 
     for (i = 0; i < numcomps; i++) {
         cmptparm[i].prec = (OPJ_UINT32)prec;
-        cmptparm[i].sgnd = 0;
+        cmptparm[i].sgnd = (i >= 1) ? 1 : 0;  /* comp 1,2 signed; comp 0 unsigned */
         cmptparm[i].dx = (OPJ_UINT32)subsampling_dx;
         cmptparm[i].dy = (OPJ_UINT32)subsampling_dy;
         cmptparm[i].w = (OPJ_UINT32)w;
