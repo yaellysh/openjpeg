@@ -150,12 +150,15 @@ static OPJ_BOOL isy_read_cblk_dump(const char *path, isy_cblk_dump_t *out)
     /* Parse ASCII header until DATA_BEGIN */
     char line[256];
     OPJ_BOOL saw_data_begin = OPJ_FALSE;
+    int is_int16 = 0; /* 0 = int32_rowmajor (default), 1 = int16_rowmajor */
 
     while (fgets(line, (int)sizeof(line), f) != NULL) {
         if (strncmp(line, "x0=", 3) == 0) out->x0 = (OPJ_INT32)atoi(line + 3);
         else if (strncmp(line, "y0=", 3) == 0) out->y0 = (OPJ_INT32)atoi(line + 3);
         else if (strncmp(line, "w=",  2) == 0) out->w  = (OPJ_INT32)atoi(line + 2);
         else if (strncmp(line, "h=",  2) == 0) out->h  = (OPJ_INT32)atoi(line + 2);
+        else if (strncmp(line, "format=int16_rowmajor", 21) == 0) is_int16 = 1;
+        else if (strncmp(line, "format=int32_rowmajor", 21) == 0) is_int16 = 0;
         else if (strncmp(line, "DATA_BEGIN", 10) == 0) { saw_data_begin = OPJ_TRUE; break; }
     }
 
@@ -172,14 +175,37 @@ static OPJ_BOOL isy_read_cblk_dump(const char *path, isy_cblk_dump_t *out)
         return OPJ_FALSE;
     }
 
-    /* Payload is raw int32 */
-    const size_t got = fread(out->data, sizeof(OPJ_INT32), n, f);
-    fclose(f);
-
-    if (got != n) {
-        fprintf(stderr, "[EXT_DWT] short payload read %s got=%zu expected=%zu\n", path, got, n);
-        isy_free_cblk_dump(out);
-        return OPJ_FALSE;
+    if (is_int16) {
+        /* Payload is raw int16 (little-endian), convert to int32 */
+        OPJ_INT16 *tmp = (OPJ_INT16*)opj_malloc(n * sizeof(OPJ_INT16));
+        if (!tmp) {
+            fclose(f);
+            opj_free(out->data);
+            out->data = NULL;
+            return OPJ_FALSE;
+        }
+        const size_t got = fread(tmp, sizeof(OPJ_INT16), n, f);
+        fclose(f);
+        if (got != n) {
+            fprintf(stderr, "[EXT_DWT] short payload read %s got=%zu expected=%zu (int16)\n", path, got, n);
+            opj_free(tmp);
+            isy_free_cblk_dump(out);
+            return OPJ_FALSE;
+        }
+        /* Convert int16 -> int32 */
+        for (size_t i = 0; i < n; ++i) {
+            out->data[i] = (OPJ_INT32)tmp[i];
+        }
+        opj_free(tmp);
+    } else {
+        /* Payload is raw int32 */
+        const size_t got = fread(out->data, sizeof(OPJ_INT32), n, f);
+        fclose(f);
+        if (got != n) {
+            fprintf(stderr, "[EXT_DWT] short payload read %s got=%zu expected=%zu (int32)\n", path, got, n);
+            isy_free_cblk_dump(out);
+            return OPJ_FALSE;
+        }
     }
 
     return OPJ_TRUE;
@@ -1832,26 +1858,10 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
 
         /* FIXME _ProfStart(PGROUP_DC_SHIFT); */
         /*---------------TILE-------------------*/
-        if (!opj_tcd_dc_level_shift_encode(p_tcd))
-        {
-            return OPJ_FALSE;
-        }
-        /* FIXME _ProfStop(PGROUP_DC_SHIFT); */
-
-        /* FIXME _ProfStart(PGROUP_MCT); */
-        if (!opj_tcd_mct_encode(p_tcd))
-        {
-            return OPJ_FALSE;
-        }
-        /* FIXME _ProfStop(PGROUP_MCT); */
-
-        /* FIXME _ProfStart(PGROUP_DWT); */
-        // if (! opj_tcd_dwt_encode(p_tcd)) {
-        //     return OPJ_FALSE;
-        // }
-
+        
         ////////////////////////////////////////////////////////////////////////////////////////////////
-        // External DWT via ISyntax library
+        // External DWT via ISyntax library - skip DC shift, MCT, DWT entirely
+        // Coefficients go directly to EBCOT (T1)
 
         if (getenv("OPJ_EXTERNAL_DWT") != NULL)
         {
@@ -1861,9 +1871,25 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
             {
                 return OPJ_FALSE;
             }
+            // Skip DC shift, MCT, DWT - go straight to T1
         }
         else
         {
+            // Normal encoding path: DC shift -> MCT -> DWT
+            if (!opj_tcd_dc_level_shift_encode(p_tcd))
+            {
+                return OPJ_FALSE;
+            }
+            /* FIXME _ProfStop(PGROUP_DC_SHIFT); */
+
+            /* FIXME _ProfStart(PGROUP_MCT); */
+            if (!opj_tcd_mct_encode(p_tcd))
+            {
+                return OPJ_FALSE;
+            }
+            /* FIXME _ProfStop(PGROUP_MCT); */
+
+            /* FIXME _ProfStart(PGROUP_DWT); */
             if (!opj_tcd_dwt_encode(p_tcd))
             {
                 return OPJ_FALSE;
@@ -1925,467 +1951,234 @@ static void print_range(const char* tag, const isy_cblk_dump_t* d)
     fprintf(stderr, "[RAW] %s: first=%d min=%d max=%d\n", tag, d->data[0], mn, mx);
 }
 
+static void copy_center_cropped_plane_into_tc(
+    opj_tcd_tilecomp_t *tc,
+    const isy_cblk_dump_t *dump,
+    OPJ_INT32 dst_off_x,
+    OPJ_INT32 dst_off_y,
+    OPJ_INT32 dst_w,
+    OPJ_INT32 dst_h
+) {
+    OPJ_INT32 tc_w = (OPJ_INT32)(tc->x1 - tc->x0);
+
+    OPJ_INT32 pad_x = 0, pad_y = 0;
+    if (dump->w > dst_w) pad_x = (dump->w - dst_w) / 2;
+    if (dump->h > dst_h) pad_y = (dump->h - dst_h) / 2;
+
+    OPJ_INT32 copy_w = (dump->w - 2 * pad_x < dst_w) ? (dump->w - 2 * pad_x) : dst_w;
+    OPJ_INT32 copy_h = (dump->h - 2 * pad_y < dst_h) ? (dump->h - 2 * pad_y) : dst_h;
+
+    /* Debug: print min/max of source region being copied */
+    OPJ_INT32 src_min = dump->data[pad_y * dump->w + pad_x];
+    OPJ_INT32 src_max = src_min;
+    for (OPJ_INT32 y = 0; y < copy_h; ++y) {
+        for (OPJ_INT32 x = 0; x < copy_w; ++x) {
+            OPJ_INT32 v = dump->data[(pad_y + y) * dump->w + pad_x + x];
+            if (v < src_min) src_min = v;
+            if (v > src_max) src_max = v;
+        }
+    }
+    fprintf(stderr, "[COPY] off=(%d,%d) size=%dx%d src_range=[%d, %d]\n",
+            dst_off_x, dst_off_y, copy_w, copy_h, src_min, src_max);
+
+    for (OPJ_INT32 y = 0; y < copy_h; ++y) {
+        OPJ_INT32 *dst = &tc->data[(dst_off_y + y) * tc_w + dst_off_x];
+        const OPJ_INT32 *src = &dump->data[(pad_y + y) * dump->w + pad_x];
+        memcpy(dst, src, (size_t)copy_w * sizeof(OPJ_INT32));
+    }
+}
+
 
 #include <string.h>
 
 static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 {
-    const char *BASE = "/Users/yaellyshkow/Desktop/libisyntax";
+    const char *BASE = "/Users/yaellyshkow/Desktop/iSyntaxtoj2k/libisyntax";
+    const int ISY_SCALE = 3;
+    const int ISY_TX = 10;
+    const int ISY_TY = 10;
 
     fprintf(stderr, "[EXT_DWT] ENTER external_fill_tilec_from_isyntax\n");
 
     opj_tcd_tile_t *tile = p_tcd->tcd_image->tiles;
 
-    fprintf(stderr,
-        "[EXT_DWT] ENTRY comp0 numres=%u\n",
-        tile->comps[0].numresolutions);
-
-        
-    /* Zero buffers */
-    for (OPJ_UINT32 compno = 0; compno < tile->numcomps; ++compno)
-    {
-        opj_tcd_tilecomp_t *tilec = &tile->comps[compno];
-
-        fprintf(stderr, "comp %u prec=%d sgnd=%d\n",
-                compno,
-                p_tcd->image->comps[compno].prec,
-                p_tcd->image->comps[compno].sgnd);
-
-        OPJ_INT32 tile_w_c = (OPJ_INT32)(tilec->x1 - tilec->x0);
-        OPJ_INT32 tile_h_c = (OPJ_INT32)(tilec->y1 - tilec->y0);
-        memset(tilec->data, 0, (size_t)tile_w_c * (size_t)tile_h_c * sizeof(OPJ_INT32));
-    }
-
-    if (tile->numcomps < 3)
-    {
-        fprintf(stderr, "[EXT_DWT] expected 3 components\n");
+    if (tile->numcomps < 3) {
+        fprintf(stderr, "[EXT_DWT] expected 3 components, got %u\n", tile->numcomps);
         return OPJ_FALSE;
     }
 
-    /* Use comp0 geometry as reference */
-    opj_tcd_tilecomp_t *tilec0 = &tile->comps[0];
-    OPJ_INT32 tile_w = (OPJ_INT32)(tilec0->x1 - tilec0->x0);
-    OPJ_INT32 tile_h = (OPJ_INT32)(tilec0->y1 - tilec0->y0);
+    /* ----------------------------
+       1) Zero ALL component buffers
+       ---------------------------- */
+    for (OPJ_UINT32 compno = 0; compno < tile->numcomps; ++compno) {
+        opj_tcd_tilecomp_t *tc = &tile->comps[compno];
 
-    /* Require same geometry/resolutions for the 3 comps (no subsampling) */
-    for (OPJ_UINT32 c = 1; c < 3; ++c)
-    {
+        OPJ_INT32 tc_w = (OPJ_INT32)(tc->x1 - tc->x0);
+        OPJ_INT32 tc_h = (OPJ_INT32)(tc->y1 - tc->y0);
+
+        fprintf(stderr, "comp %u prec=%d sgnd=%d tc=%dx%d numres=%u\n",
+                compno,
+                p_tcd->image->comps[compno].prec,
+                p_tcd->image->comps[compno].sgnd,
+                (int)tc_w, (int)tc_h,
+                tc->numresolutions);
+
+        memset(tc->data, 0, (size_t)tc_w * (size_t)tc_h * sizeof(OPJ_INT32));
+    }
+
+    /* --------------------------------------
+       2) Validate geometry/resolutions once
+       -------------------------------------- */
+    opj_tcd_tilecomp_t *tc0 = &tile->comps[0];
+
+    if (tc0->numresolutions < 2) {
+        fprintf(stderr, "[EXT_DWT] need at least 2 resolutions, got %u\n", tc0->numresolutions);
+        return OPJ_FALSE;
+    }
+
+    for (OPJ_UINT32 c = 1; c < 3; ++c) {
         opj_tcd_tilecomp_t *tc = &tile->comps[c];
-        if (tc->numresolutions != tilec0->numresolutions)
-        {
+        if (tc->numresolutions != tc0->numresolutions) {
             fprintf(stderr, "[EXT_DWT] comp%u numresolutions differs (%u vs %u)\n",
-                    c, tc->numresolutions, tilec0->numresolutions);
+                    c, tc->numresolutions, tc0->numresolutions);
             return OPJ_FALSE;
         }
-        if (tc->x0 != tilec0->x0 || tc->y0 != tilec0->y0 ||
-            tc->x1 != tilec0->x1 || tc->y1 != tilec0->y1)
-        {
-            fprintf(stderr, "[EXT_DWT] comp%u geometry differs; subsampling likely\n", c);
+        if (tc->x0 != tc0->x0 || tc->y0 != tc0->y0 || tc->x1 != tc0->x1 || tc->y1 != tc0->y1) {
+            fprintf(stderr, "[EXT_DWT] comp%u geometry differs from comp0\n", c);
             return OPJ_FALSE;
         }
     }
 
-#if 0
-    {
-        opj_tcd_tilecomp_t *tc0 = &tile->comps[0];
-
-        for (OPJ_UINT32 r = 0; r < tc0->numresolutions; ++r) {
-            opj_tcd_resolution_t *res = &tc0->resolutions[r];
-            fprintf(stderr,
-                "[OPJ] resno=%u: x0=%d y0=%d x1=%d y1=%d  w=%d h=%d  numbands=%u\n",
-                r,
-                res->x0, res->y0, res->x1, res->y1,
-                (int)(res->x1 - res->x0),
-                (int)(res->y1 - res->y0),
-                res->numbands);
-            for (OPJ_UINT32 b = 0; b < res->numbands; ++b) {
-                opj_tcd_band_t *band = &res->bands[b];
-                fprintf(stderr,
-                    "      bandno=%u: x0=%d y0=%d x1=%d y1=%d  w=%d h=%d\n",
-                    band->bandno,
-                    band->x0, band->y0, band->x1, band->y1,
-                    (int)(band->x1 - band->x0),
-                    (int)(band->y1 - band->y0));
-            }
-        }
-    }
-#endif
-
-
-    /* ------------------------------------------------------------
-       1) Fill LL (resno=0, band=LL) DIRECTLY from your isyntax grid.
-          Do NOT rely on prc->cblks for LL in this stage.
-       ------------------------------------------------------------ */
-    {
-        // const OPJ_UINT32 isy_r = 0; /* your dumps: isy_r0_LL_* */
-        const OPJ_UINT32 isy_r = tilec0->numresolutions - 1;
-        const char *band_label = "LL";
-
-        OPJ_UINT32 ll_resno = 0;
-        for (OPJ_UINT32 r = 0; r < tilec0->numresolutions; ++r) {
-            if (tilec0->resolutions[r].numbands == 1) { /* LL-only resolution */
-                ll_resno = r;
-                break;
-            }
-        }
-        opj_tcd_resolution_t *llres = &tilec0->resolutions[ll_resno];
-
-        OPJ_INT32 ll_w = (OPJ_INT32)(llres->x1 - llres->x0);
-        OPJ_INT32 ll_h = (OPJ_INT32)(llres->y1 - llres->y0);
-
-        const OPJ_INT32 BS = 64;
-
-        fprintf(stderr, "[LL] numres=%u ll_resno=%u llres=(%d,%d)-(%d,%d) ll_w=%d ll_h=%d tile=%dx%d\n",
-                tilec0->numresolutions, ll_resno,
-                (int)llres->x0, (int)llres->y0, (int)llres->x1, (int)llres->y1,
-                (int)ll_w, (int)ll_h, (int)tile_w, (int)tile_h);
-
-        for (OPJ_UINT32 r=0; r<tilec0->numresolutions; ++r) {
-            opj_tcd_resolution_t *rr = &tilec0->resolutions[r];
-            fprintf(stderr, "[OPJ] res[%u] (%d,%d)-(%d,%d) w=%d h=%d numbands=%u\n",
-                    r, (int)rr->x0, (int)rr->y0, (int)rr->x1, (int)rr->y1,
-                    (int)(rr->x1-rr->x0), (int)(rr->y1-rr->y0), rr->numbands);
-        }
-
-        for (OPJ_INT32 by = 0; by < ll_h; by += BS)
-        {
-            for (OPJ_INT32 bx = 0; bx < ll_w; bx += BS)
-            {
-
-                char pathY[512], pathC1[512], pathC2[512];
-                snprintf(pathY, sizeof(pathY), "%s/isy_r%u_%s_c0_x0_%d_y0_%d.bin", BASE, isy_r, band_label, bx, by);
-                snprintf(pathC1, sizeof(pathC1), "%s/isy_r%u_%s_c1_x0_%d_y0_%d.bin", BASE, isy_r, band_label, bx, by);
-                snprintf(pathC2, sizeof(pathC2), "%s/isy_r%u_%s_c2_x0_%d_y0_%d.bin", BASE, isy_r, band_label, bx, by);
-
-                isy_cblk_dump_t dumpY  = (isy_cblk_dump_t){0};
-                isy_cblk_dump_t dumpC1 = (isy_cblk_dump_t){0};
-                isy_cblk_dump_t dumpC2 = (isy_cblk_dump_t){0};
-
-                OPJ_BOOL okY = isy_read_cblk_dump(pathY, &dumpY);
-                OPJ_BOOL okC1 = isy_read_cblk_dump(pathC1, &dumpC1);
-                OPJ_BOOL okC2 = isy_read_cblk_dump(pathC2, &dumpC2);
-
-                if (!okY || !okC1 || !okC2)
-                {
-                    fprintf(stderr, "[EXT_DWT] LL missing block (%d,%d): %s %s %s\n",
-                            bx, by, pathY, pathC1, pathC2);
-                    if (okY)
-                        isy_free_cblk_dump(&dumpY);
-                    if (okC1)
-                        isy_free_cblk_dump(&dumpC1);
-                    if (okC2)
-                        isy_free_cblk_dump(&dumpC2);
-                    continue;
-                }
-
-                fprintf(stderr, "[RAW] %s (%d,%d)\n", band_label, bx, by);
-                print_range("Y ",  &dumpY);
-                print_range("C1",  &dumpC1);
-                print_range("C2",  &dumpC2);
-
-                fprintf(stderr,
-                    "[LL] isy_r=%u bx=%d by=%d dump(w,h)=%d,%d dump(x0,y0)=%d,%d\n",
-                    isy_r, bx, by, dumpY.w, dumpY.h, dumpY.x0, dumpY.y0);
-                
-                opj_tcd_tilecomp_t *tc0 = &tile->comps[0];
-                opj_tcd_tilecomp_t *tc1 = &tile->comps[1];
-                opj_tcd_tilecomp_t *tc2 = &tile->comps[2];
-
-                opj_tcd_band_t *ll0 = &tc0->resolutions[0].bands[0];
-                opj_tcd_band_t *ll1 = &tc1->resolutions[0].bands[0];
-                opj_tcd_band_t *ll2 = &tc2->resolutions[0].bands[0];
-
-                OPJ_INT32 base_x0 = (OPJ_INT32)(ll0->x0 - tc0->x0);
-                OPJ_INT32 base_y0 = (OPJ_INT32)(ll0->y0 - tc0->y0);
-                OPJ_INT32 base_x1 = (OPJ_INT32)(ll1->x0 - tc1->x0);
-                OPJ_INT32 base_y1 = (OPJ_INT32)(ll1->y0 - tc1->y0);
-                OPJ_INT32 base_x2 = (OPJ_INT32)(ll2->x0 - tc2->x0);
-                OPJ_INT32 base_y2 = (OPJ_INT32)(ll2->y0 - tc2->y0);
-
-                /* use bx/by (subband-local) rather than dumpY.x0/y0 */
-                OPJ_INT32 px0 = base_x0 + bx;
-                OPJ_INT32 py0 = base_y0 + by;
-                OPJ_INT32 px1 = base_x1 + bx;
-                OPJ_INT32 py1 = base_y1 + by;
-                OPJ_INT32 px2 = base_x2 + bx;
-                OPJ_INT32 py2 = base_y2 + by;
-                
-
-                /* Copy into packed plane at same coords (LL occupies [0..tile_w), [0..tile_h)) */
-              
-                    const OPJ_INT32 shift = 1 << (p_tcd->image->comps[0].prec - 1); // 128
-                    for (OPJ_INT32 yy = 0; yy < dumpY.h; ++yy)
-                    {
-                        OPJ_INT32 *dst0 = &tile->comps[0].data[(py0 + yy) * tile_w + px0];
-                        OPJ_INT32 *dst1 = &tile->comps[1].data[(py1 + yy) * tile_w + px1];
-                        OPJ_INT32 *dst2 = &tile->comps[2].data[(py2 + yy) * tile_w + px2];
-
-                        OPJ_INT32 *src0 = &dumpY.data[yy * dumpY.w];
-                        OPJ_INT32 *src1 = &dumpC1.data[yy * dumpC1.w];
-                        OPJ_INT32 *src2 = &dumpC2.data[yy * dumpC2.w];
-
-                        const OPJ_INT32 shift0 = 1 << (p_tcd->image->comps[0].prec - 1); // 128 for 8-bit
-
-                        for (OPJ_INT32 xx = 0; xx < dumpY.w; ++xx)
-                        {
-                            dst0[xx] = src0[xx] - shift0;   // YES: comp0 LL gets level shift
-                            // dst0[xx] = src0[xx];            // NO: keep as-is (already signed)
-                            dst1[xx] = src1[xx];            // NO: keep as-is (already signed)
-                            dst2[xx] = src2[xx];
-                            // dst1[xx] = 0;
-                            // dst2[xx] = 0;
-
-                        }
-                    }
-
-                fprintf(stderr, "[EXT_DWT] filled LL block (%d,%d) %dx%d\n", bx, by, BS, BS);
-
-                isy_free_cblk_dump(&dumpY);
-                isy_free_cblk_dump(&dumpC1);
-                isy_free_cblk_dump(&dumpC2);
-            }
-        }
-
-#if 0
-        /* Zero out LL to visualize only detail bands (HL/LH/HH) */
-        fprintf(stderr, "[DEBUG] OPJ_DEBUG_DETAILS_ONLY: zeroing LL band\n");
-        for (OPJ_UINT32 c = 0; c < 3; ++c)
-        {
-            opj_tcd_tilecomp_t *tc = &tile->comps[c];
-            opj_tcd_resolution_t *res0 = &tc->resolutions[0];
-            OPJ_INT32 ll_w_c = res0->x1 - res0->x0;
-            OPJ_INT32 ll_h_c = res0->y1 - res0->y0;
-            for (OPJ_INT32 yy = 0; yy < ll_h_c; ++yy)
-            {
-                for (OPJ_INT32 xx = 0; xx < ll_w_c; ++xx)
-                {
-                    tc->data[yy * tile_w + xx] = 0;
-                }
-            }
-        }
-#endif
+    /* Debug: resolution rectangles */
+    for (OPJ_UINT32 r = 0; r < tc0->numresolutions; ++r) {
+        opj_tcd_resolution_t *rr = &tc0->resolutions[r];
+        fprintf(stderr, "[OPJ] res[%u] (%d,%d)-(%d,%d) w=%d h=%d numbands=%u\n",
+                r, (int)rr->x0, (int)rr->y0, (int)rr->x1, (int)rr->y1,
+                (int)(rr->x1 - rr->x0), (int)(rr->y1 - rr->y0), rr->numbands);
     }
 
-    /* ------------------------------------------------------------
-   2) Fill detail bands (resno >= 1): HL/LH/HH by scanning the dump grid.
-      This avoids relying on prc->cblks.enc (which may be empty here).
-   ------------------------------------------------------------ */
-#if 1  /* DISABLED FOR TESTING - LL only */
-    {
-        const OPJ_INT32 BS = 64;    /* dump block stride */
-        // const OPJ_UINT32 isy_r = 1; /* your dumps: isy_r1_{HL,LH,HH}_* */
+    /* --------------------------------------
+       3) Load coefficients into each component
+       
+       Matching reconstruction.py pack_subbands():
+         LL at (0, 0)        - top-left
+         HL at (W/2, 0)      - top-right
+         LH at (0, H/2)      - bottom-left
+         HH at (W/2, H/2)    - bottom-right
+       -------------------------------------- */
+    for (OPJ_UINT32 compno = 0; compno < 3; ++compno) {
+        opj_tcd_tilecomp_t *tc = &tile->comps[compno];
 
-        /* This path only matches your current dump set (r0 + r1). */
-        if (tilec0->numresolutions < 2)
+        OPJ_INT32 tc_w = (OPJ_INT32)(tc->x1 - tc->x0);
+        OPJ_INT32 tc_h = (OPJ_INT32)(tc->y1 - tc->y0);
+        
+        /* For 1-level DWT, subbands are each half the tile size */
+        OPJ_INT32 half_w = tc_w / 2;
+        OPJ_INT32 half_h = tc_h / 2;
+
+        fprintf(stderr, "[EXT_DWT] comp%u: tc=%dx%d, half=%dx%d\n", 
+                compno, tc_w, tc_h, half_w, half_h);
+
+        /* ---- LL at top-left (0,0) ---- */
         {
-            fprintf(stderr, "[EXT_DWT] need at least 2 resolutions for r1 detail bands\n");
-        }
-        else
-        {
-            OPJ_UINT32 resno = tilec0->numresolutions - 1;     // = 1 (the highest res with details)
-            OPJ_UINT32 isy_r = resno;    
+            char path[512];
+            snprintf(path, sizeof(path),
+                     "%s/isy_full_s%d_tx%d_ty%d_r0_LL_c%u.bin",
+                     BASE, ISY_SCALE, ISY_TX, ISY_TY, compno);
 
-            opj_tcd_resolution_t *res  = &tilec0->resolutions[resno];
-            opj_tcd_resolution_t *pres = &tilec0->resolutions[resno - 1];
-
-            /* Previous-resolution size used to offset packed subbands */
-            OPJ_INT32 pres_w = (OPJ_INT32)(pres->x1 - pres->x0);
-            OPJ_INT32 pres_h = (OPJ_INT32)(pres->y1 - pres->y0);
-
-            for (OPJ_UINT32 bandidx = 0; bandidx < res->numbands; ++bandidx)
-            {
-                opj_tcd_band_t *band = &res->bands[bandidx];
-
-                if (band->bandno == 0)
-                    continue; /* no LL at resno >= 1 */
-
-    
-                const char *band_label =
-                    (band->bandno == 1) ? "HL" 
-                            : (band->bandno == 2) ? "LH"
-                                            : (band->bandno == 3)   ? "HH"
-                                                                    : NULL;
-                if (!band_label)
-                    continue;
-
-                /* subband dimensions */
-                OPJ_INT32 band_w = band->x1 - band->x0;
-                OPJ_INT32 band_h = band->y1 - band->y0;
-
-                fprintf(stderr, "[EXT_DWT] processing resno=%u bandno=%u tile=%dx%d pres=%dx%d band=%dx%d\n",
-                    resno, band->bandno, tile_w, tile_h, pres_w, pres_h, band_w, band_h);
-
-                /* Scan subband-local blocks */
-                for (OPJ_INT32 sy = 0; sy < band_h; sy += BS)
-                {
-                    for (OPJ_INT32 sx = 0; sx < band_w; sx += BS)
-                    {
-
-                        char pathY[512], pathC1[512], pathC2[512];
-                        snprintf(pathY, sizeof(pathY), "%s/isy_r%u_%s_c0_x0_%d_y0_%d.bin", BASE, isy_r, band_label, sx, sy);
-                        snprintf(pathC1, sizeof(pathC1), "%s/isy_r%u_%s_c1_x0_%d_y0_%d.bin", BASE, isy_r, band_label, sx, sy);
-                        snprintf(pathC2, sizeof(pathC2), "%s/isy_r%u_%s_c2_x0_%d_y0_%d.bin", BASE, isy_r, band_label, sx, sy);
-
-                        fprintf(stderr, "[PATH] %s %s %s\n", pathY, pathC1, pathC2);
-
-                        isy_cblk_dump_t dumpY, dumpC1, dumpC2;
-                        OPJ_BOOL okY = isy_read_cblk_dump(pathY, &dumpY);
-                        OPJ_BOOL okC1 = isy_read_cblk_dump(pathC1, &dumpC1);
-                        OPJ_BOOL okC2 = isy_read_cblk_dump(pathC2, &dumpC2);
-
-                        if (okY && okC1 && okC2 && sx == 0 && sy == 0)
-                        {
-                            fprintf(stderr, "[RAW] %s (0,0)\n", band_label);
-                            print_range("Y ",  &dumpY);
-                            print_range("C1",  &dumpC1);
-                            print_range("C2",  &dumpC2);
-                            fprintf(stderr, "[DEBUG] %s (0,0): Y[0]=%d C1[0]=%d C2[0]=%d, Y range: ",
-                                    band_label, dumpY.data[0], dumpC1.data[0], dumpC2.data[0]);
-
-                            OPJ_INT32 minY = dumpY.data[0], maxY = dumpY.data[0];
-                            for (int i = 0; i < dumpY.w * dumpY.h; i++)
-                            {
-                                if (dumpY.data[i] < minY)
-                                    minY = dumpY.data[i];
-                                if (dumpY.data[i] > maxY)
-                                    maxY = dumpY.data[i];
-                            }
-                            fprintf(stderr, "min=%d max=%d\n", minY, maxY);
-                        }
-
-                        if (!okY || !okC1 || !okC2)
-                        {
-                            if (okY)
-                                isy_free_cblk_dump(&dumpY);
-                            if (okC1)
-                                isy_free_cblk_dump(&dumpC1);
-                            if (okC2)
-                                isy_free_cblk_dump(&dumpC2);
-                            continue;
-                        }
-
-                        if (sx == 0 && sy == 0) {
-                            long long sum = 0;
-                            int n = dumpY.w * dumpY.h;
-                            for (int i = 0; i < n; ++i) sum += dumpY.data[i];
-                            fprintf(stderr, "[SUM] %s (0,0) = %lld\n", band_label, sum);
-                        }
-
-                        /* Expect subband-local coords in dump */
-                        if (dumpY.x0 != sx || dumpY.y0 != sy ||
-                            dumpC1.x0 != sx || dumpC1.y0 != sy ||
-                            dumpC2.x0 != sx || dumpC2.y0 != sy)
-                        {
-                            fprintf(stderr, "[EXT_DWT] dump coord mismatch %s expected sub=(%d,%d) got Y@(%d,%d)\n",
-                                    band_label, sx, sy, dumpY.x0, dumpY.y0);
-                            isy_free_cblk_dump(&dumpY);
-                            isy_free_cblk_dump(&dumpC1);
-                            isy_free_cblk_dump(&dumpC2);
-                            continue;
-                        }
-
-                        OPJ_INT32 w = dumpY.w;
-                        OPJ_INT32 h = dumpY.h;
-
-                        if (dumpC1.w != w || dumpC1.h != h || dumpC2.w != w || dumpC2.h != h)
-                        {
-                            fprintf(stderr, "[EXT_DWT] dump size mismatch %s sub=(%d,%d)\n", band_label, sx, sy);
-                            isy_free_cblk_dump(&dumpY);
-                            isy_free_cblk_dump(&dumpC1);
-                            isy_free_cblk_dump(&dumpC2);
-                            continue;
-                        }
-
-                        opj_tcd_tilecomp_t *tc0 = &tile->comps[0];
-                        opj_tcd_tilecomp_t *tc1 = &tile->comps[1];
-                        opj_tcd_tilecomp_t *tc2 = &tile->comps[2];
-
-                        /* Use packed DWT layout offsets:
-                        * LL at (0,0), HL at (pres_w,0), LH at (0,pres_h), HH at (pres_w,pres_h) */
-                        OPJ_INT32 offx = 0, offy = 0;
-                        if (band->bandno == 1) { offx = pres_w; offy = 0; }       /* HL */
-                        else if (band->bandno == 2) { offx = 0; offy = pres_h; }  /* LH */
-                        else if (band->bandno == 3) { offx = pres_w; offy = pres_h; } /* HH */
-
-                        OPJ_INT32 px0 = offx + sx;
-                        OPJ_INT32 py0 = offy + sy;
-                        OPJ_INT32 px1 = offx + sx;
-                        OPJ_INT32 py1 = offy + sy;
-                        OPJ_INT32 px2 = offx + sx;
-                        OPJ_INT32 py2 = offy + sy;
-
-                        fprintf(stderr, "[EXT_DWT] %s: band->x0=%d tc0->x0=%d pres=(%d,%d) off=(%d,%d) sub=(%d,%d) -> p=(%d,%d)\n",
-                            band_label, band->x0, tc0->x0, pres_w, pres_h, offx, offy, sx, sy, px0, py0);
-
-
-                        if (px0 < 0 || py0 < 0 || px0 + w > tile_w || py0 + h > tile_h ||
-                            px1 < 0 || py1 < 0 || px1 + w > tile_w || py1 + h > tile_h ||
-                            px2 < 0 || py2 < 0 || px2 + w > tile_w || py2 + h > tile_h)
-                        {
-                            isy_free_cblk_dump(&dumpY);
-                            isy_free_cblk_dump(&dumpC1);
-                            isy_free_cblk_dump(&dumpC2);
-                            continue;
-                        }
-
-                        for (OPJ_INT32 yy = 0; yy < h; ++yy)
-                        {
-                            OPJ_INT32 *dst0 = &tc0->data[(OPJ_SIZE_T)(py0 + yy) * tile_w + (OPJ_SIZE_T)px0];
-                            OPJ_INT32 *dst1 = &tc1->data[(OPJ_SIZE_T)(py1 + yy) * tile_w + (OPJ_SIZE_T)px1];
-                            OPJ_INT32 *dst2 = &tc2->data[(OPJ_SIZE_T)(py2 + yy) * tile_w + (OPJ_SIZE_T)px2];
-
-                            OPJ_INT32 *src0 = &dumpY.data[(OPJ_SIZE_T)yy * (OPJ_SIZE_T)w];
-                            OPJ_INT32 *src1 = &dumpC1.data[(OPJ_SIZE_T)yy * (OPJ_SIZE_T)w];
-                            OPJ_INT32 *src2 = &dumpC2.data[(OPJ_SIZE_T)yy * (OPJ_SIZE_T)w];
-
-                            for (OPJ_INT32 xx = 0; xx < w; ++xx)
-                            {
-                                dst0[xx] = (OPJ_INT32)lrint((double)src0[xx]);
-                                dst1[xx] = (OPJ_INT32)lrint((double)src1[xx]);
-                                dst2[xx] = (OPJ_INT32)lrint((double)src2[xx]);
-                            }
-                        }
-
-                        fprintf(stderr, "[EXT_DWT] filled %s sub=(%d,%d) c0=(%d,%d) %dx%d\n",
-                            band_label, sx, sy, px0, py0, w, h);
-
-                        isy_free_cblk_dump(&dumpY);
-                        isy_free_cblk_dump(&dumpC1);
-                        isy_free_cblk_dump(&dumpC2);
-                    }
-                }
+            isy_cblk_dump_t dump = {0};
+            if (!isy_read_cblk_dump(path, &dump)) {
+                fprintf(stderr, "[EXT_DWT] Failed to load %s\n", path);
+                return OPJ_FALSE;
             }
-            
+            fprintf(stderr, "[EXT_DWT] LL: file %dx%d -> placing at (0,0) size %dx%d\n",
+                    dump.w, dump.h, half_w, half_h);
+
+            copy_center_cropped_plane_into_tc(tc, &dump, 0, 0, half_w, half_h);
+            isy_free_cblk_dump(&dump);
+        }
+
+        /* ---- HL at top-right (half_w, 0) ---- */
+        {
+            char path[512];
+            snprintf(path, sizeof(path),
+                     "%s/isy_full_s%d_tx%d_ty%d_r0_HL_c%u.bin",
+                     BASE, ISY_SCALE, ISY_TX, ISY_TY, compno);
+
+            isy_cblk_dump_t dump = {0};
+            if (!isy_read_cblk_dump(path, &dump)) {
+                fprintf(stderr, "[EXT_DWT] Failed to load %s\n", path);
+                return OPJ_FALSE;
+            }
+            fprintf(stderr, "[EXT_DWT] HL: file %dx%d -> placing at (%d,0) size %dx%d\n",
+                    dump.w, dump.h, half_w, half_w, half_h);
+
+            copy_center_cropped_plane_into_tc(tc, &dump, half_w, 0, half_w, half_h);
+            isy_free_cblk_dump(&dump);
+        }
+
+        /* ---- LH at bottom-left (0, half_h) ---- */
+        {
+            char path[512];
+            snprintf(path, sizeof(path),
+                     "%s/isy_full_s%d_tx%d_ty%d_r0_LH_c%u.bin",
+                     BASE, ISY_SCALE, ISY_TX, ISY_TY, compno);
+
+            isy_cblk_dump_t dump = {0};
+            if (!isy_read_cblk_dump(path, &dump)) {
+                fprintf(stderr, "[EXT_DWT] Failed to load %s\n", path);
+                return OPJ_FALSE;
+            }
+            fprintf(stderr, "[EXT_DWT] LH: file %dx%d -> placing at (0,%d) size %dx%d\n",
+                    dump.w, dump.h, half_h, half_w, half_h);
+
+            copy_center_cropped_plane_into_tc(tc, &dump, 0, half_h, half_w, half_h);
+            isy_free_cblk_dump(&dump);
+        }
+
+        /* ---- HH at bottom-right (half_w, half_h) ---- */
+        {
+            char path[512];
+            snprintf(path, sizeof(path),
+                     "%s/isy_full_s%d_tx%d_ty%d_r0_HH_c%u.bin",
+                     BASE, ISY_SCALE, ISY_TX, ISY_TY, compno);
+
+            isy_cblk_dump_t dump = {0};
+            if (!isy_read_cblk_dump(path, &dump)) {
+                fprintf(stderr, "[EXT_DWT] Failed to load %s\n", path);
+                return OPJ_FALSE;
+            }
+            fprintf(stderr, "[EXT_DWT] HH: file %dx%d -> placing at (%d,%d) size %dx%d\n",
+                    dump.w, dump.h, half_w, half_h, half_w, half_h);
+
+            copy_center_cropped_plane_into_tc(tc, &dump, half_w, half_h, half_w, half_h);
+            isy_free_cblk_dump(&dump);
         }
     }
 
-#endif  /* DISABLED FOR TESTING - LL only */
-
+    /* Debug: print final tc->data stats for comp0 */
     {
-        opj_tcd_tilecomp_t *c0 = &tile->comps[0]; /* Y  -> will become R */
-        opj_tcd_tilecomp_t *c1 = &tile->comps[1]; /* Co -> will become G */
-        opj_tcd_tilecomp_t *c2 = &tile->comps[2]; /* Cg -> will become B */
-
-        OPJ_SIZE_T n = (OPJ_SIZE_T)tile_w * (OPJ_SIZE_T)tile_h;
-
-        for (OPJ_SIZE_T i = 0; i < n; ++i) {
-            OPJ_INT32 Y  = c0->data[i];
-            OPJ_INT32 Co = c1->data[i];
-            OPJ_INT32 Cg = c2->data[i];
-
-            OPJ_INT32 t = Y - (Cg >> 1);
-            OPJ_INT32 g = Cg + t;
-            OPJ_INT32 b = t - (Co >> 1);
-            OPJ_INT32 r = b + Co;
-
-            c0->data[i] = r;
-            c1->data[i] = g;
-            c2->data[i] = b;
+        opj_tcd_tilecomp_t *tc = &tile->comps[0];
+        OPJ_INT32 tc_w = (OPJ_INT32)(tc->x1 - tc->x0);
+        OPJ_INT32 tc_h = (OPJ_INT32)(tc->y1 - tc->y0);
+        OPJ_INT32 mn = tc->data[0], mx = tc->data[0];
+        for (int i = 0; i < tc_w * tc_h; ++i) {
+            if (tc->data[i] < mn) mn = tc->data[i];
+            if (tc->data[i] > mx) mx = tc->data[i];
         }
+        fprintf(stderr, "[EXT_DWT] comp0 tc->data: min=%d max=%d first4=[%d,%d,%d,%d]\n",
+                mn, mx, tc->data[0], tc->data[1], tc->data[2], tc->data[3]);
     }
 
+    // Assume: tc[0] = Y, tc[1] = Co, tc[2] = Cg
+    opj_tcd_tilecomp_t *Yc = &tile->comps[0];
+    opj_tcd_tilecomp_t *Coc = &tile->comps[1];
+    opj_tcd_tilecomp_t *Cgc = &tile->comps[2];
+
+    fprintf(stderr, "[EXT_DWT] Coefficient loading complete\n");
     return OPJ_TRUE;
 }
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
