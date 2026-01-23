@@ -2018,7 +2018,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
        ------------------------------------------------------------ */
     {
         // const OPJ_UINT32 isy_r = 0; /* your dumps: isy_r0_LL_* */
-        const OPJ_UINT32 isy_r = 0;
+        const OPJ_UINT32 isy_r = tilec0->numresolutions - 1;
         const char *band_label = "LL";
 
         OPJ_UINT32 ll_resno = 0;
@@ -2129,6 +2129,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         for (OPJ_INT32 xx = 0; xx < dumpY.w; ++xx)
                         {
                             dst0[xx] = src0[xx] - shift0;   // YES: comp0 LL gets level shift
+                            // dst0[xx] = src0[xx];            // NO: keep as-is (already signed)
                             dst1[xx] = src1[xx];            // NO: keep as-is (already signed)
                             dst2[xx] = src2[xx];
                             // dst1[xx] = 0;
@@ -2327,10 +2328,6 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                             continue;
                         }
 
-                        double gain = 100.0;
-                        // if (band->bandno == 1 || band->bandno == 2) gain = 0.5;   /* HL, LH */
-                        // else if (band->bandno == 3) gain = 0.25;                  /* HH */
-
                         for (OPJ_INT32 yy = 0; yy < h; ++yy)
                         {
                             OPJ_INT32 *dst0 = &tc0->data[(OPJ_SIZE_T)(py0 + yy) * tile_w + (OPJ_SIZE_T)px0];
@@ -2343,11 +2340,9 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 
                             for (OPJ_INT32 xx = 0; xx < w; ++xx)
                             {
-                                dst0[xx] = (OPJ_INT32)lrint((double)src0[xx] * gain);
-                                dst1[xx] = (OPJ_INT32)lrint((double)src1[xx] * gain);
-                                dst2[xx] = (OPJ_INT32)lrint((double)src2[xx] * gain);
-                                // dst1[xx] = 0;
-                                // dst2[xx] = 0;
+                                dst0[xx] = (OPJ_INT32)lrint((double)src0[xx]);
+                                dst1[xx] = (OPJ_INT32)lrint((double)src1[xx]);
+                                dst2[xx] = (OPJ_INT32)lrint((double)src2[xx]);
                             }
                         }
 
