@@ -835,7 +835,7 @@ opj_image_t* tgatoimage(const char *filename, opj_cparameters_t *parameters)
     subsampling_dy = parameters->subsampling_dy;
 
     for (i = 0; i < numcomps; i++) {
-        cmptparm[i].prec = 8;
+        cmptparm[i].prec = 16;
         cmptparm[i].sgnd = 1;  /* signed for wavelet coefficients */
         cmptparm[i].dx = (OPJ_UINT32)subsampling_dx;
         cmptparm[i].dy = (OPJ_UINT32)subsampling_dy;
@@ -1870,7 +1870,7 @@ opj_image_t* pnmtoimage(const char *filename, opj_cparameters_t *parameters)
     memset(&cmptparm[0], 0, (size_t)numcomps * sizeof(opj_image_cmptparm_t));
 
     for (i = 0; i < numcomps; i++) {
-        cmptparm[i].prec = (OPJ_UINT32)prec;
+        cmptparm[i].prec = 8;
         cmptparm[i].sgnd = 1;
         cmptparm[i].dx = (OPJ_UINT32)subsampling_dx;
         cmptparm[i].dy = (OPJ_UINT32)subsampling_dy;

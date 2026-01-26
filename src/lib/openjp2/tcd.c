@@ -1871,9 +1871,13 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
             {
                 return OPJ_FALSE;
             }
-            // Skip DC shift, MCT, DWT - go straight to T1
-        }
-        else
+
+            fprintf(stderr, "c0 %d x %d  c1 %d x %d  c2 %d x %d\n",
+                (int)(tile->comps[0].x1 - tile->comps[0].x0), (int)(tile->comps[0].y1 - tile->comps[0].y0),
+                (int)(tile->comps[1].x1 - tile->comps[1].x0), (int)(tile->comps[1].y1 - tile->comps[1].y0),
+                (int)(tile->comps[2].x1 - tile->comps[2].x0), (int)(tile->comps[2].y1 - tile->comps[2].y0));
+
+        } else
         {
             // Normal encoding path: DC shift -> MCT -> DWT
             if (!opj_tcd_dc_level_shift_encode(p_tcd))
