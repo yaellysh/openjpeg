@@ -1870,8 +1870,8 @@ opj_image_t* pnmtoimage(const char *filename, opj_cparameters_t *parameters)
     memset(&cmptparm[0], 0, (size_t)numcomps * sizeof(opj_image_cmptparm_t));
 
     for (i = 0; i < numcomps; i++) {
-        cmptparm[i].prec = 8;
-        cmptparm[i].sgnd = 1;
+        cmptparm[i].prec = 16; // CAN'T DO 8 AS THE RANGE IS TOO LARGE  
+        cmptparm[i].sgnd = (i == 0) ? 0 : 1;   // Y unsigned, Co/Cg signed
         cmptparm[i].dx = (OPJ_UINT32)subsampling_dx;
         cmptparm[i].dy = (OPJ_UINT32)subsampling_dy;
         cmptparm[i].w = (OPJ_UINT32)w;

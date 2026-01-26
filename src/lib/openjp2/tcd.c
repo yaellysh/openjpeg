@@ -296,6 +296,30 @@ static OPJ_BOOL isy_read_cblk_dump_old(const char *path, isy_cblk_dump_t *out)
     return OPJ_TRUE;
 }
 
+static void dump_band_raw_i32(
+    const opj_tcd_tilecomp_t *tilec,
+    const opj_tcd_band_t *band,
+    const char *path
+) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); return; }
+
+    OPJ_INT32 tc_w = (OPJ_INT32)(tilec->x1 - tilec->x0);
+
+    OPJ_INT32 base_x = (OPJ_INT32)(band->x0 - tilec->x0);
+    OPJ_INT32 base_y = (OPJ_INT32)(band->y0 - tilec->y0);
+
+    OPJ_INT32 w = (OPJ_INT32)(band->x1 - band->x0);
+    OPJ_INT32 h = (OPJ_INT32)(band->y1 - band->y0);
+
+    for (OPJ_INT32 y = 0; y < h; ++y) {
+        const OPJ_INT32 *row = tilec->data + (base_y + y) * tc_w + base_x;
+        fwrite(row, sizeof(OPJ_INT32), (size_t)w, f);
+    }
+
+    fclose(f);
+}
+
 /**
  * Initializes tile coding/decoding
  */
@@ -1872,6 +1896,29 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
                 return OPJ_FALSE;
             }
 
+            if (getenv("ISY_DUMP_PREIDWT_ENC")) {
+                for (OPJ_UINT32 compno = 0; compno < tile->numcomps; ++compno) {
+                    opj_tcd_tilecomp_t *tilec = &tile->comps[compno];
+
+                    for (OPJ_UINT32 resno = 0; resno < tilec->numresolutions; ++resno) {
+                        opj_tcd_resolution_t *res = &tilec->resolutions[resno];
+
+                        OPJ_UINT32 nbands = (resno == 0) ? 1U : 3U;
+                        for (OPJ_UINT32 b = 0; b < nbands; ++b) {
+                            const opj_tcd_band_t *band = &res->bands[b];
+
+                            char path[512];
+                            snprintf(path, sizeof(path),
+                                "/tmp/enc_preidwt_c%u_res%u_b%u.bin",
+                                compno, resno, b);
+
+                            dump_band_raw_i32(tilec, band, path);
+                        }
+                    }
+                }
+            }
+
+
             fprintf(stderr, "c0 %d x %d  c1 %d x %d  c2 %d x %d\n",
                 (int)(tile->comps[0].x1 - tile->comps[0].x0), (int)(tile->comps[0].y1 - tile->comps[0].y0),
                 (int)(tile->comps[1].x1 - tile->comps[1].x0), (int)(tile->comps[1].y1 - tile->comps[1].y0),
@@ -1966,8 +2013,8 @@ static void copy_center_cropped_plane_into_tc(
     OPJ_INT32 tc_w = (OPJ_INT32)(tc->x1 - tc->x0);
 
     OPJ_INT32 pad_x = 0, pad_y = 0;
-    if (dump->w > dst_w) pad_x = (dump->w - dst_w) / 2;
-    if (dump->h > dst_h) pad_y = (dump->h - dst_h) / 2;
+    // if (dump->w > dst_w) pad_x = (dump->w - dst_w) / 2;
+    // if (dump->h > dst_h) pad_y = (dump->h - dst_h) / 2;
 
     OPJ_INT32 copy_w = (dump->w - 2 * pad_x < dst_w) ? (dump->w - 2 * pad_x) : dst_w;
     OPJ_INT32 copy_h = (dump->h - 2 * pad_y < dst_h) ? (dump->h - 2 * pad_y) : dst_h;
@@ -2186,6 +2233,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
+
 OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
                              OPJ_UINT32 win_x0,
                              OPJ_UINT32 win_y0,
@@ -2343,33 +2391,6 @@ OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
         }
     }
 
-#ifdef TODO_MSD /* FIXME */
-    /* INDEX >>  */
-    if (p_cstr_info)
-    {
-        OPJ_UINT32 resno, compno, numprec = 0;
-        for (compno = 0; compno < (OPJ_UINT32)p_cstr_info->numcomps; compno++)
-        {
-            opj_tcp_t *tcp = &p_tcd->cp->tcps[0];
-            opj_tccp_t *tccp = &tcp->tccps[compno];
-            opj_tcd_tilecomp_t *tilec_idx = &p_tcd->tcd_image->tiles->comps[compno];
-            for (resno = 0; resno < tilec_idx->numresolutions; resno++)
-            {
-                opj_tcd_resolution_t *res_idx = &tilec_idx->resolutions[resno];
-                p_cstr_info->tile[p_tile_no].pw[resno] = res_idx->pw;
-                p_cstr_info->tile[p_tile_no].ph[resno] = res_idx->ph;
-                numprec += res_idx->pw * res_idx->ph;
-                p_cstr_info->tile[p_tile_no].pdx[resno] = tccp->prcw[resno];
-                p_cstr_info->tile[p_tile_no].pdy[resno] = tccp->prch[resno];
-            }
-        }
-        p_cstr_info->tile[p_tile_no].packet = (opj_packet_info_t *)opj_malloc(
-            p_cstr_info->numlayers * numprec * sizeof(opj_packet_info_t));
-        p_cstr_info->packno = 0;
-    }
-    /* << INDEX */
-#endif
-
     /*--------------TIER2------------------*/
     /* FIXME _ProfStart(PGROUP_T2); */
     l_data_read = 0;
@@ -2385,8 +2406,38 @@ OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
     /* FIXME _ProfStart(PGROUP_T1); */
     if (!opj_tcd_t1_decode(p_tcd, p_manager))
     {
+        fprintf(stderr, "[CALLSITE] T1 decode failed\n");
         return OPJ_FALSE;
     }
+
+    fprintf(stderr, "[CALLSITE] after T1 decode\n");
+    
+    // COME BACK HERE
+
+    if (getenv("ISY_DUMP_PREIDWT_DEC")) {
+        fprintf(stderr, "[DUMP] Dumping pre-IDWT decoded bands to /tmp/dec_preidwt_c*_res*_b*.bin\n");
+        opj_tcd_tile_t *tile = p_tcd->tcd_image->tiles;
+        for (OPJ_UINT32 c = 0; c < tile->numcomps; ++c) {
+            opj_tcd_tilecomp_t *tilec = &tile->comps[c];
+
+            for (OPJ_UINT32 resno = 0; resno < tilec->numresolutions; ++resno) {
+                opj_tcd_resolution_t *res = &tilec->resolutions[resno];
+
+                OPJ_UINT32 nbands = (resno == 0) ? 1U : 3U;
+                for (OPJ_UINT32 b = 0; b < nbands; ++b) {
+                    const opj_tcd_band_t *band = &res->bands[b];
+
+                    char path[512];
+                    snprintf(path, sizeof(path),
+                        "/tmp/dec_preidwt_c%u_res%u_b%u.bin",
+                        c, resno, b);
+
+                    dump_band_raw_i32(tilec, band, path);
+                }
+            }
+        }
+    }
+
     /* FIXME _ProfStop(PGROUP_T1); */
 
     /* For subtile decoding, now we know the resno_decoded, we can allocate */
@@ -2440,11 +2491,28 @@ OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
 
     /*----------------DWT---------------------*/
 
+
     /* FIXME _ProfStart(PGROUP_DWT); */
     if (!opj_tcd_dwt_decode(p_tcd))
     {
         return OPJ_FALSE;
     }
+
+    {
+        opj_tcd_tile_t *tile = p_tcd->tcd_image->tiles;
+        opj_tcd_tilecomp_t *tc0 = &tile->comps[0];
+        OPJ_INT32 w = (OPJ_INT32)(tc0->x1 - tc0->x0);
+        OPJ_INT32 h = (OPJ_INT32)(tc0->y1 - tc0->y0);
+
+        OPJ_INT32 mn = tc0->data[0], mx = tc0->data[0];
+        for (OPJ_INT32 i = 0; i < w*h; i++) {
+            OPJ_INT32 v = tc0->data[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+        fprintf(stderr, "[POST-IDWT] c0 min=%d max=%d\n", (int)mn, (int)mx);
+    }
+
     /* FIXME _ProfStop(PGROUP_DWT); */
 
     /*----------------MCT-------------------*/
@@ -2461,6 +2529,22 @@ OPJ_BOOL opj_tcd_decode_tile(opj_tcd_t *p_tcd,
         return OPJ_FALSE;
     }
     /* FIXME _ProfStop(PGROUP_DC_SHIFT); */
+
+    {
+        opj_tcd_tile_t *tile = p_tcd->tcd_image->tiles;
+        opj_tcd_tilecomp_t *tc0 = &tile->comps[0];
+        OPJ_INT32 w = (OPJ_INT32)(tc0->x1 - tc0->x0);
+        OPJ_INT32 h = (OPJ_INT32)(tc0->y1 - tc0->y0);
+
+        OPJ_INT32 mn = tc0->data[0], mx = tc0->data[0];
+        for (OPJ_INT32 i = 0; i < w*h; i++) {
+            OPJ_INT32 v = tc0->data[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+        fprintf(stderr, "[POST-DCSHIFT] c0 min=%d max=%d\n", (int)mn, (int)mx);
+    }
+
 
     /*---------------TILE-------------------*/
     return OPJ_TRUE;
