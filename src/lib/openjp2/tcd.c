@@ -2064,6 +2064,15 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
     for (OPJ_UINT32 compno = 0; compno < tile->numcomps; ++compno) {
         opj_tcd_tilecomp_t *tc = &tile->comps[compno];
 
+        fprintf(stderr,
+            "[GRID] comp%u tilec x0,y0=(%d,%d) x1,y1=(%d,%d) w=%d h=%d\n",
+            compno,
+            (int)tc->x0, (int)tc->y0,
+            (int)tc->x1, (int)tc->y1,
+            (int)(tc->x1 - tc->x0),
+            (int)(tc->y1 - tc->y0)
+        );
+
         OPJ_INT32 tc_w = (OPJ_INT32)(tc->x1 - tc->x0);
         OPJ_INT32 tc_h = (OPJ_INT32)(tc->y1 - tc->y0);
 
