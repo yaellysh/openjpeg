@@ -2143,27 +2143,6 @@ static int env_int_or(const char *name, int defv) {
     return atoi(s);
 }
 
-static void scatter_subband_into_tilec(
-    OPJ_INT32 *dst, OPJ_INT32 dst_w,
-    const OPJ_INT32 *src, OPJ_INT32 src_w, OPJ_INT32 src_h,
-    OPJ_INT32 level_l, OPJ_INT32 ox, OPJ_INT32 oy
-){
-    const OPJ_INT32 bit = (level_l - 1);
-    const OPJ_INT32 xoff = (ox << bit);
-    const OPJ_INT32 yoff = (oy << bit);
-
-    for (OPJ_INT32 y = 0; y < src_h; ++y) {
-        OPJ_INT32 dy = (y << level_l) + yoff;
-        OPJ_INT32 dst_row = dy * dst_w;
-        OPJ_INT32 src_row = y * src_w;
-
-        for (OPJ_INT32 x = 0; x < src_w; ++x) {
-            OPJ_INT32 dx = (x << level_l) + xoff;
-            dst[dst_row + dx] = src[src_row + x];
-        }
-    }
-}
-
 static void band_oxoy(OPJ_UINT32 bandidx, OPJ_INT32 *ox, OPJ_INT32 *oy)
 {
     // OpenJPEG detail bands order is typically: HL, LH, HH
@@ -2297,9 +2276,15 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                     if (src[i] > mx) mx = src[i];
                 }
                 fprintf(stderr, "[DEBUG] LL band loaded: comp=%u resno=%u min=%d max=%d first4=[%d,%d,%d,%d]\n", compno, resno, mn, mx, src[0], src[1], src[2], src[3]);
-                // place_band_into_tilec(tc, band, src, src_w, src_h);
-                OPJ_INT32 K = (OPJ_INT32)(tc->numresolutions - 1);
-                scatter_subband_into_tilec(tc->data, tc_w, src, bw, bh, K, 0, 0);
+                
+                for (OPJ_INT32 y = 0; y < bh; ++y) {
+                    memcpy(
+                        tc->data + y * tc_w,
+                        src + y * bw,
+                        bw * sizeof(OPJ_INT32)
+                    );
+                }
+
 
                 // Print min/max after placement
                 OPJ_INT32 tc_mn = tc->data[0], tc_mx = tc->data[0];
@@ -2309,7 +2294,8 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                 }
                 fprintf(stderr, "[DEBUG] After LL placement: comp=%u resno=%u min=%d max=%d first4=[%d,%d,%d,%d]\n", compno, resno, tc_mn, tc_mx, tc->data[0], tc->data[1], tc->data[2], tc->data[3]);
                 opj_free(src);
-            } else {
+            } 
+            else {
                 /* HL/LH/HH: typically 3 bands */
                 for (OPJ_UINT32 bandidx = 0; bandidx < 3; ++bandidx) {
                     opj_tcd_band_t *band = &res->bands[bandidx];
@@ -2329,11 +2315,18 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         if (src[i] > mx) mx = src[i];
                     }
                     fprintf(stderr, "[DEBUG] Detail band loaded: comp=%u resno=%u band=%u min=%d max=%d first4=[%d,%d,%d,%d]\n", compno, resno, bandidx, mn, mx, src[0], src[1], src[2], src[3]);
-                    // place_band_into_tilec(tc, band, src, src_w, src_h);
-                    OPJ_INT32 l = (OPJ_INT32)(tc->numresolutions - resno);
-                    OPJ_INT32 ox, oy;
-                    band_oxoy(bandidx, &ox, &oy);
-                    scatter_subband_into_tilec(tc->data, tc_w, src, bw, bh, l, ox, oy);
+
+                    OPJ_INT32 off_x = (bandidx == 0 || bandidx == 2) ? bw : 0; // HL, HH
+                    OPJ_INT32 off_y = (bandidx == 1 || bandidx == 2) ? bh : 0; // LH, HH
+
+                    for (OPJ_INT32 y = 0; y < bh; ++y) {
+                        memcpy(
+                            tc->data + (off_y + y) * tc_w + off_x,
+                            src + y * bw,
+                            bw * sizeof(OPJ_INT32)
+                        );
+                    }
+
                     // Print min/max after placement
                     OPJ_INT32 tc_mn = tc->data[0], tc_mx = tc->data[0];
                     for (int i = 0; i < tc_w * tc_h; ++i) {
