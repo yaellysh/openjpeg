@@ -2068,11 +2068,93 @@ static OPJ_BOOL load_plane_autodetect(
 static const char* detail_label(OPJ_UINT32 bandidx)
 {
     switch (bandidx) {
-        case 0: return "HL";
-        case 1: return "LH";
-        case 2: return "HH";
+        case 0: return "hl";
+        case 1: return "lh";
+        case 2: return "hh";
         default: return NULL;
     }
+}
+
+#include <dirent.h>
+#include <errno.h>
+
+static OPJ_BOOL parse_offsets_from_name(const char* name, int* xoff, int* yoff) {
+    // expects "...__000382_000382_codeblock_....raw"
+    const char* p = strstr(name, "__");
+    if (!p) return OPJ_FALSE;
+    p += 2;
+    char* end = NULL;
+    long x = strtol(p, &end, 10);
+    if (!end || *end != '_') return OPJ_FALSE;
+    long y = strtol(end + 1, &end, 10);
+    if (!end) return OPJ_FALSE;
+    *xoff = (int)x;
+    *yoff = (int)y;
+    return OPJ_TRUE;
+}
+
+static OPJ_BOOL find_raw_for_band(const char* dir, int level, OPJ_UINT32 compno,
+                                  const char* band, char* out_path, size_t out_sz,
+                                  int* xoff, int* yoff)
+{
+    DIR* d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "opendir(%s) failed: %s\n", dir, strerror(errno));
+        return OPJ_FALSE;
+    }
+
+    struct dirent* ent;
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "%d_%u_%s__", level, compno, band);
+
+    while ((ent = readdir(d)) != NULL) {
+        const char* n = ent->d_name;
+        if (strncmp(n, prefix, strlen(prefix)) != 0) continue;
+        if (!strstr(n, "_codeblock_")) continue;
+        if (!strstr(n, ".raw")) continue;
+
+        if (!parse_offsets_from_name(n, xoff, yoff)) continue;
+
+        snprintf(out_path, out_sz, "%s/%s", dir, n);
+        closedir(d);
+        return OPJ_TRUE;
+    }
+
+    closedir(d);
+    return OPJ_FALSE;
+}
+
+static OPJ_BOOL load_raw_i16(const char* path, OPJ_INT16** out, int* out_w, int* out_h) {
+    *out = NULL; *out_w = *out_h = 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "%s: %s\n", path, strerror(errno));
+        return OPJ_FALSE;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return OPJ_FALSE; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return OPJ_FALSE; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return OPJ_FALSE; }
+
+    if (sz % 2 != 0) { fclose(f); return OPJ_FALSE; }
+    long n = sz / 2;
+    int s = (int)(sqrt((double)n) + 0.5);
+    if ((long)s * (long)s != n) {
+        fprintf(stderr, "raw not square int16: %s bytes=%ld\n", path, sz);
+        fclose(f);
+        return OPJ_FALSE;
+    }
+
+    OPJ_INT16* buf = (OPJ_INT16*)opj_malloc((size_t)sz);
+    if (!buf) { fclose(f); return OPJ_FALSE; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        opj_free(buf);
+        fclose(f);
+        return OPJ_FALSE;
+    }
+    fclose(f);
+    *out = buf; *out_w = s; *out_h = s;
+    return OPJ_TRUE;
 }
 
 static int dump_r_from_resno(OPJ_UINT32 numresolutions, OPJ_UINT32 resno)
@@ -2090,48 +2172,77 @@ static OPJ_BOOL load_dump_for_band(
     OPJ_UINT32 resno,
     OPJ_UINT32 bandidx,
     OPJ_INT32 bw, OPJ_INT32 bh,
-    OPJ_INT32 **out_buf,
-    int scale,
-    int tile_x,
-    int tile_y
+    OPJ_INT32 **out_buf
 ){
     *out_buf = NULL;
 
-    char path[512];
-    if (resno == 0) {
-        // LL
-        snprintf(path, sizeof(path),
-            "%s/isy_s%d_tx%d_ty%d_r0_LL_c%u.bin",
-            BASE,
-            scale,
-            tile_x,
-            tile_y,
-            compno);
+    const int K = (int)numresolutions - 1;
+
+    int level = 0;
+    const int BASE_L = getenv("ISY_BASE_LEVEL") ? atoi(getenv("ISY_BASE_LEVEL")) : 0;
+
+    const char* lab = NULL;
+    const OPJ_BOOL is_ll = (resno == 0);
+
+    if (is_ll) {
+        level = BASE_L;      // was 0
+        lab = "ll";
     } else {
-        const char *lab = detail_label(bandidx);
-        if (!lab) {
-            fprintf(stderr, "bad bandidx=%u for resno=%u\n", bandidx, resno);
-            return OPJ_FALSE;
-        }
-        int r = dump_r_from_resno(numresolutions, resno);
-        snprintf(path, sizeof(path),
-            "%s/isy_s%d_tx%d_ty%d_r%d_%s_c%u.bin",
-            BASE,
-            scale,
-            tile_x,
-            tile_y,
-            r,
-            lab,
-            compno);
-        }
+        level = BASE_L;      // ignore mapping for now; you only have one level worth
+        lab = detail_label(bandidx);
+        if (!lab) return OPJ_FALSE;
+    }
 
-    OPJ_INT32 *buf = NULL;
-
-    if (!load_plane_autodetect(path, bw, bh, &buf)) {
+    char raw_path[512];
+    int xoff = 0, yoff = 0;
+    if (!find_raw_for_band(BASE, level, compno, lab, raw_path, sizeof(raw_path), &xoff, &yoff)) {
+        fprintf(stderr, "no raw found for level=%d comp=%u band=%s in %s\n", level, compno, lab, BASE);
         return OPJ_FALSE;
     }
 
-    *out_buf = buf;
+    OPJ_INT16* blk = NULL;
+    int blk_w = 0, blk_h = 0;
+    if (!load_raw_i16(raw_path, &blk, &blk_w, &blk_h)) return OPJ_FALSE;
+
+    OPJ_INT32* full = (OPJ_INT32*)opj_calloc((size_t)bw * (size_t)bh, sizeof(OPJ_INT32));
+    if (!full) { opj_free(blk); return OPJ_FALSE; }
+
+    int dx = xoff;
+    int dy = yoff;
+
+    // your observed quadrant shift: LL offset = H offset + 128
+    if (is_ll) { dx -= 128; dy -= 128; }
+
+    // convert global offsets -> local offsets within this OpenJPEG band tile
+    static int origin_set[3][4] = {{0}};
+    static int origin_x[3][4], origin_y[3][4]; // [comp][bandidx:0=ll,1=hl,2=lh,3=hh]
+    int bi = is_ll ? 0 : (bandidx + 1);
+
+    if (!origin_set[compno][bi]) {
+        origin_x[compno][bi] = dx;
+        origin_y[compno][bi] = dy;
+        origin_set[compno][bi] = 1;
+    }
+    dx -= origin_x[compno][bi];
+    dy -= origin_y[compno][bi];
+
+
+    if (dx < 0 || dy < 0 || dx + blk_w > bw || dy + blk_h > bh) {
+        fprintf(stderr, "block OOB: band=%s level=%d comp=%u off=(%d,%d) blk=%dx%d plane=%dx%d file=%s\n",
+                lab, level, compno, dx, dy, blk_w, blk_h, (int)bw, (int)bh, raw_path);
+        opj_free(blk);
+        opj_free(full);
+        return OPJ_FALSE;
+    }
+
+    for (int y = 0; y < blk_h; ++y) {
+        OPJ_INT32* dst = full + (dy + y) * bw + dx;
+        OPJ_INT16* src = blk + y * blk_w;
+        for (int x = 0; x < blk_w; ++x) dst[x] = (OPJ_INT32)src[x];
+    }
+
+    opj_free(blk);
+    *out_buf = full;
     return OPJ_TRUE;
 }
 
@@ -2168,7 +2279,9 @@ static void parity_stats(OPJ_INT32 *d, OPJ_INT32 w, OPJ_INT32 h) {
 
 static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 {
-    const char *BASE = "/Users/yaellyshkow/Desktop/iSyntaxtoj2k/libisyntax";
+    const char *BASE = getenv("ISY_COEFF_DIR");
+    if (!BASE) BASE = "/Users/yaellyshkow/Desktop/iSyntaxtoj2k/libisyntax";
+
     const int ISY_SCALE = env_int_or("ISY_SCALE", 3);
     const int ISY_TX    = env_int_or("ISY_TX", 0);
     const int ISY_TY    = env_int_or("ISY_TY", 0);
@@ -2265,7 +2378,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                 /* Load dump matching this band */
                 OPJ_INT32 *src = NULL;
                 OPJ_INT32 src_w = bw, src_h = bh;
-                if (!load_dump_for_band(BASE, tc->numresolutions, compno, resno, 0, bw, bh, &src, s, tile_x, tile_y)) {
+                if (!load_dump_for_band(BASE, tc->numresolutions, compno, resno, 0, bw, bh, &src)) {
                     fprintf(stderr, "[DEBUG] load_dump_for_band failed for comp=%u resno=%u band=LL\n", compno, resno);
                     return OPJ_FALSE;
                 }
@@ -2304,7 +2417,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 
                     OPJ_INT32 *src = NULL;
                     OPJ_INT32 src_w = bw, src_h = bh;
-                    if (!load_dump_for_band(BASE, tc->numresolutions, compno, resno, bandidx, bw, bh, &src, s, tile_x, tile_y)) {
+                    if (!load_dump_for_band(BASE, tc->numresolutions, compno, resno, bandidx, bw, bh, &src)) {
                         fprintf(stderr, "[DEBUG] load_dump_for_band failed for comp=%u resno=%u band=%u\n", compno, resno, bandidx);
                         return OPJ_FALSE;
                     }
@@ -2314,7 +2427,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         if (src[i] < mn) mn = src[i];
                         if (src[i] > mx) mx = src[i];
                     }
-                    
+
                     fprintf(stderr, "[DEBUG] Detail band loaded: comp=%u resno=%u band=%u min=%d max=%d first4=[%d,%d,%d,%d]\n", compno, resno, bandidx, mn, mx, src[0], src[1], src[2], src[3]);
 
                     OPJ_INT32 off_x = (bandidx == 0 || bandidx == 2) ? bw : 0; // HL, HH

@@ -1,4 +1,4 @@
-To run code, libisyntax and this,
+To run OpenJPEG, 
 
 ```cd /Users/yaellyshkow/Desktop/iSyntaxtoj2k/openjpeg
 
@@ -12,4 +12,19 @@ ISY_DUMP_PREIDWT_DEC=1 ./build/bin/opj_decompress -i out.j2k -o /tmp/out.pgx
 
 python3 src/lib/openjp2/ycocg_recon.py /tmp/out_0.pgx /tmp/out_1.pgx /tmp/out_2.pgx /tmp/recon.ppm
 open /tmp/recon.ppm
+```
+
+and libisyntax,
+
+```
+cd /Users/yaellyshkow/Desktop/iSyntaxtoj2k/libisyntax
+
+cmake --build build -- -j                           
+ISY_DUMP_PREIDWT_BIN=1 ISY_DWT_LEVELS=1 \
+ISY_WANT_SCALE=3 ISY_WANT_TX=10 ISY_WANT_TY=10 \
+./isyntax_example testslide.isyntax 3 10 10 tile_output.png
+
+ISY_DUMP_PREIDWT_BIN=1 ISY_DWT_LEVELS=1 \
+ISY_WANT_SCALE=2 ISY_WANT_TX=20 ISY_WANT_TY=20 \
+./isyntax_example testslide.isyntax 2 20 20 tile_output.png
 ```
