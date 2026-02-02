@@ -2314,6 +2314,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                         if (src[i] < mn) mn = src[i];
                         if (src[i] > mx) mx = src[i];
                     }
+                    
                     fprintf(stderr, "[DEBUG] Detail band loaded: comp=%u resno=%u band=%u min=%d max=%d first4=[%d,%d,%d,%d]\n", compno, resno, bandidx, mn, mx, src[0], src[1], src[2], src[3]);
 
                     OPJ_INT32 off_x = (bandidx == 0 || bandidx == 2) ? bw : 0; // HL, HH
