@@ -1,15 +1,22 @@
 To run OpenJPEG, 
 
-```cd /Users/yaellyshkow/Desktop/iSyntaxtoj2k/openjpeg
+```
+<!-- Get into openjpeg folder -->
+cd /Users/yaellyshkow/Desktop/iSyntaxtoj2k/openjpeg
 
-cmake --build build -- -j                          
-OPJ_EXTERNAL_DWT=1 ISY_DUMP_PREIDWT_DEC=1 ISY_SCALE=3 ISY_TX=10 ISY_TY=10   ISY_DUMP_PREIDWT_ENC=1 ./build/bin/opj_compress \
+<!-- Remake and set flags -->
+cmake --build build -- -j 
+ISY_COEFF_DIR="/Users/yaellyshkow/Desktop/hugh_coeffs" \
+ISY_BASE_LEVEL=7 \
+OPJ_EXTERNAL_DWT=1 \
+
+<!-- Compress with opj_compress -->
+./build/bin/opj_compress \
   -i ~/Desktop/isyntaxtoj2k/openjpeg/tile_output.ppm \
   -o out.j2k \
-  -n 2 -b 64,64 -t 256,256 -mct 0
+  -n 2 -b 64,64 -mct 0ISY_DUMP_PREIDWT_DEC=1 ./build/bin/opj_decompress -i out.j2k -o /tmp/out.pgx
 
-ISY_DUMP_PREIDWT_DEC=1 ./build/bin/opj_decompress -i out.j2k -o /tmp/out.pgx
-
+<!-- Run python script to view results -->
 python3 src/lib/openjp2/ycocg_recon.py /tmp/out_0.pgx /tmp/out_1.pgx /tmp/out_2.pgx /tmp/recon.ppm
 open /tmp/recon.ppm
 ```

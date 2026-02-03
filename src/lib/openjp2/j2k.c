@@ -12641,6 +12641,8 @@ OPJ_BOOL opj_j2k_encoder_set_extra_options(
 
 /* ----------------------------------------------------------------------- */
 
+
+// WHERE WE ENCODE TO J2K
 OPJ_BOOL opj_j2k_encode(opj_j2k_t * p_j2k,
                         opj_stream_private_t *p_stream,
                         opj_event_mgr_t * p_manager)
@@ -13275,6 +13277,8 @@ static OPJ_BOOL opj_j2k_write_all_tile_parts(opj_j2k_t *p_j2k,
 
     /* start writing remaining tile parts */
     ++p_j2k->m_specific_param.m_encoder.m_current_tile_part_number;
+
+    // WHERE WE GO THROUGH TILES!!
     for (tilepartno = 1; tilepartno < tot_num_tp ; ++tilepartno) {
         p_j2k->m_specific_param.m_encoder.m_current_poc_tile_part_number = tilepartno;
         l_current_nb_bytes_written = 0;
