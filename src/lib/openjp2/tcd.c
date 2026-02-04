@@ -2118,6 +2118,13 @@ static OPJ_BOOL load_dump_for_band(
 
     closedir(d);
 
+    // Print tx, ty, tc->x0, tc->y0, band->x0, band->y0, req_x0, req_y0
+    // Note: tc, band, tx, ty, req_x0, req_y0 are not available in this scope.
+    // We'll print what we can from the function arguments.
+
+    // Since we don't have access to tc, band, tx, ty here, print what we do have:
+    fprintf(stderr, "[DEBUG] req_x0=%d req_y0=%d bw=%d bh=%d\n", req_x0, req_y0, bw, bh);
+
     if (!hit) {
         fprintf(stderr, "no matching raw tiles for base=%d level=%d band=%s in %s\n", BASE_L, level, lab, BASE);
         opj_free(full);
@@ -2164,7 +2171,8 @@ static void debug_tilec_quadrants(const opj_tcd_tilecomp_t* tc, OPJ_UINT32 compn
 static void isy_global_origin(int *gx0, int *gy0) {
     const int ISY_TX = env_int_or("ISY_TX", 0);
     const int ISY_TY = env_int_or("ISY_TY", 0);
-    const int ISY_STEP = env_int_or("ISY_STEP", 32768); // TODO: set to your tile pitch at BASE_L
+    // TODO: make this not hardcoded
+    const int ISY_STEP = env_int_or("ISY_STEP", 8192);
     *gx0 = ISY_TX * ISY_STEP;
     *gy0 = ISY_TY * ISY_STEP;
 }
@@ -2265,7 +2273,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                 const int tw = (int)p_tcd->cp->tw;
                 const int tx = (int)(p_tcd->tcd_tileno % tw);
                 const int ty = (int)(p_tcd->tcd_tileno / tw);
-                const int pitch = env_int_or("ISY_STEP", 32768);
+                const int pitch = env_int_or("ISY_STEP", 8192);
                 const OPJ_INT32 g0x = (OPJ_INT32)tx * pitch;
                 const OPJ_INT32 g0y = (OPJ_INT32)ty * pitch;
 
@@ -2280,17 +2288,9 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                     fprintf(stderr, "[DEBUG] load_dump_for_band failed for comp=%u resno=%u band=LL\n", compno, resno);
                     return OPJ_FALSE;
                 }
-                OPJ_INT32 dx = 0;
-                OPJ_INT32 dy = 0;
-
-                // fprintf(stderr,
-                // "[PLACE] comp%u res%u band%u %s tc(x0,y0)=(%d,%d) band(x0,y0)=(%d,%d) -> dx,dy=(%d,%d) bw,bh=(%d,%d)\n",
-                // compno, resno, 0, (resno==0?"ll":detail_label(0)),
-                // (int)tc->x0,(int)tc->y0,(int)band->x0,(int)band->y0,(int)dx,(int)dy,(int)bw,(int)bh);
-
 
                 for (OPJ_INT32 y = 0; y < bh; ++y) {
-                    memcpy(tc->data + (dy + y) * tc_w + dx, src + y * bw, bw * sizeof(OPJ_INT32));
+                    memcpy(tc->data + y * tc_w, src + y * bw, bw * sizeof(OPJ_INT32));
                 }
 
                 opj_free(src);
@@ -2309,7 +2309,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
                     const int tw = (int)p_tcd->cp->tw;
                     const int tx = (int)(p_tcd->tcd_tileno % tw);
                     const int ty = (int)(p_tcd->tcd_tileno / tw);
-                    const int pitch = env_int_or("ISY_STEP", 32768);
+                    const int pitch = env_int_or("ISY_STEP", 8192);
                     const OPJ_INT32 g0x = (OPJ_INT32)tx * pitch;
                     const OPJ_INT32 g0y = (OPJ_INT32)ty * pitch;
 
@@ -2328,13 +2328,6 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 
                     OPJ_INT32 dx = off_x;
                     OPJ_INT32 dy = off_y;
-
-
-                    // fprintf(stderr,
-                    // "[PLACE] comp%u res%u band%u %s tc(x0,y0)=(%d,%d) band(x0,y0)=(%d,%d) -> dx,dy=(%d,%d) bw,bh=(%d,%d)\n",
-                    // compno, resno, bandidx, (resno==0?"ll":detail_label(bandidx)),
-                    // (int)tc->x0,(int)tc->y0,(int)band->x0,(int)band->y0,(int)dx,(int)dy,(int)bw,(int)bh);
-
 
                     for (OPJ_INT32 y = 0; y < bh; ++y) {
                         memcpy(tc->data + (dy + y) * tc_w + dx,
