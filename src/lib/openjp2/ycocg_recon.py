@@ -83,8 +83,26 @@ def main(y_pgx, co_pgx, cg_pgx, out_png):
         apply_window(G0, lo, hi),
         apply_window(B0, lo, hi),
     ])
-
+    rgb = autocrop_nonblack(rgb)
     Image.fromarray(rgb).save(out_png)
+
+def autocrop_nonblack(rgb: np.ndarray, thresh: int = 8, min_area: int = 256) -> np.ndarray:
+    """
+    Auto-crop black padding by finding bounding box of pixels whose max channel > thresh.
+    Falls back to original if nothing found or box too small.
+    """
+    mask = (rgb.max(axis=2) > thresh)
+    if not mask.any():
+        return rgb
+
+    ys, xs = np.where(mask)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+
+    if (y1 - y0) * (x1 - x0) < min_area:
+        return rgb
+
+    return rgb[y0:y1, x0:x1, :]
 
 if __name__ == "__main__":
     if len(sys.argv) != 5:
