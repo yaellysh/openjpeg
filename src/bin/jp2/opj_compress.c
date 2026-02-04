@@ -2206,6 +2206,15 @@ int main(int argc, char **argv)
             parameters.cp_tdx = 512;
             parameters.cp_tdy = 512;
         }
+
+        if (getenv("OPJ_EXTERNAL_DWT")) {
+            int W = atoi(getenv("ISY_FULL_W"));
+            int H = atoi(getenv("ISY_FULL_H"));
+            fprintf(stderr, "[DBG] forcing extent %d x %d\n", W, H);
+            image->x0 = 0; image->y0 = 0; image->x1 = W; image->y1 = H;
+        }
+
+        
         if (! opj_setup_encoder(l_codec, &parameters, image)) {
             fprintf(stderr, "failed to encode image: opj_setup_encoder\n");
             opj_destroy_codec(l_codec);
