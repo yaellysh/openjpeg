@@ -1817,7 +1817,8 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
             p_tcd->tcp = &p_tcd->cp->tcps[p_tile_no];
 
             if (!opj_tcd_init_encode_tile(p_tcd, p_tile_no, p_manager)) return OPJ_FALSE;
-            opj_tcd_tile_t *tile = &p_tcd->tcd_image->tiles[p_tile_no];
+            opj_tcd_tile_t *tile = p_tcd->tcd_image->tiles;  // NO indexing
+
 
             if (!external_fill_tilec_from_isyntax(p_tcd))
             {
@@ -2177,7 +2178,7 @@ static OPJ_BOOL external_fill_tilec_from_isyntax(opj_tcd_t *p_tcd)
 
     const int D = env_int_or("ISY_DUMP_SCALE", 64);
 
-    opj_tcd_tile_t *tile = &p_tcd->tcd_image->tiles[p_tcd->tcd_tileno];
+    opj_tcd_tile_t *tile = p_tcd->tcd_image->tiles;
 
     if (tile->numcomps < 3) {
         fprintf(stderr, "[EXT_DWT] expected 3 components, got %u\n", tile->numcomps);

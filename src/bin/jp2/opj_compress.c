@@ -1911,6 +1911,18 @@ static OPJ_FLOAT64 opj_clock(void)
 }
 
 
+// opj_compress.c (near top, before main)
+
+static int must_env_int(const char* k) {
+    const char* s = getenv(k);
+    if (!s) {
+        fprintf(stderr, "missing env %s\n", k);
+        exit(1);
+    }
+    return (int)strtol(s, NULL, 10);
+}
+
+
 /* -------------------------------------------------------------------------- */
 /**
  * OPJ_COMPRESS MAIN
@@ -2208,12 +2220,16 @@ int main(int argc, char **argv)
         }
 
         if (getenv("OPJ_EXTERNAL_DWT")) {
-            int W = atoi(getenv("ISY_FULL_W"));
-            int H = atoi(getenv("ISY_FULL_H"));
+            int W = must_env_int("ISY_FULL_W");
+            int H = must_env_int("ISY_FULL_H");
             fprintf(stderr, "[DBG] forcing extent %d x %d\n", W, H);
-            image->x0 = 0; image->y0 = 0; image->x1 = W; image->y1 = H;
+            image->x0=0; image->y0=0; image->x1=W; image->y1=H;
+            for (OPJ_UINT32 i=0;i<image->numcomps;i++){
+                OPJ_UINT32 dx=image->comps[i].dx, dy=image->comps[i].dy;
+                image->comps[i].w = (W + dx - 1) / dx;
+                image->comps[i].h = (H + dy - 1) / dy;
+            }
         }
-
         
         if (! opj_setup_encoder(l_codec, &parameters, image)) {
             fprintf(stderr, "failed to encode image: opj_setup_encoder\n");
